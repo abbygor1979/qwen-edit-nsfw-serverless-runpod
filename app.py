@@ -69,8 +69,8 @@ def upload_and_prepare_dataset(files, dataset_name, trigger_word):
         
     return f"✅ ready: {image_count} images in {dataset_name}", str(dataset_path), dataset_name
 
-# request 1 hour gpu for training
-@spaces.GPU(duration=3600) 
+# request 10 mins gpu for training
+@spaces.GPU(duration=600) 
 def train_lora(
     dataset_path,
     project_name,
