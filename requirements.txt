@@ -1,0 +1,13 @@
+gradio
+torch
+diffusers
+transformers
+accelerate
+peft
+spaces
+protobuf
+sentencepiece
+huggingface-hub
+bitsandbytes
+safetensors
+git+https://github.com/huggingface/diffusers.git
