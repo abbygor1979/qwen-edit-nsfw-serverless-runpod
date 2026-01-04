@@ -234,20 +234,89 @@ scheduler_config = {
 scheduler = FlowMatchEulerDiscreteScheduler.from_config(scheduler_config)
 
 # Load the model pipeline
-pipe = QwenImageEditPlusPipeline.from_pretrained("Qwen/Qwen-Image-Edit-2511", 
-                                                 scheduler=scheduler,
-                                                 torch_dtype=dtype).to(device)
+from safetensors.torch import load_file
+from huggingface_hub import hf_hub_download
+import torch.nn.functional as F
+
+# --- 1. setup pipeline with lightning (this works fine) ---
+pipe = QwenImageEditPlusPipeline.from_pretrained(
+    "Qwen/Qwen-Image-Edit-2511", 
+    scheduler=scheduler,
+    torch_dtype=dtype
+).to(device)
+
+print("loading lightning lora...")
 pipe.load_lora_weights(
-        "lightx2v/Qwen-Image-Edit-2511-Lightning", 
-        weight_name="Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+    "lightx2v/Qwen-Image-Edit-2511-Lightning", 
+    weight_name="Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
 )
 pipe.fuse_lora()
+print("lightning lora fused.")
 
-pipe.load_lora_weights(
-        "headlesssetton/kjfakjf", 
-        weight_name="Qwen_Snofs_1_2.safetensors"
-)
-pipe.fuse_lora(lora_scale=1.0) 
+# --- 2. manual surgery for lokr (snofs) ---
+print("attempting manual lokr injection for snofs...")
+
+try:
+    # download the file directly
+    lora_path = hf_hub_download(repo_id="headlesssetton/kjfakjf", filename="Qwen_Snofs_1_2.safetensors")
+    state_dict = load_file(lora_path)
+    
+    # lokr injection parameters
+    lokr_scale = 1.0  # adjust strength here
+    
+    # iterate and merge
+    updates = 0
+    with torch.no_grad():
+        # group keys by layer prefix
+        prefixes = set()
+        for key in state_dict.keys():
+            if "lokr_w1" in key:
+                prefixes.add(key.replace(".lokr_w1", ""))
+        
+        for prefix in prefixes:
+            # extract weights
+            w1 = state_dict[f"{prefix}.lokr_w1"].to(device, dtype=dtype)
+            w2 = state_dict[f"{prefix}.lokr_w2"].to(device, dtype=dtype)
+            alpha = state_dict.get(f"{prefix}.alpha", None)
+            
+            # calculate scaling
+            # lokr usually uses alpha / sqrt(rank) or similar, but often just alpha is enough
+            # if alpha is present, scale = alpha / w1.shape[0] (or similar convention)
+            # here we will assume simple multiplication or alpha scaling if provided
+            scale = lokr_scale
+            if alpha is not None:
+                scale *= (alpha / w1.shape[0]) # standard lora scaling convention, might vary for lokr
+
+            # compute delta: kronecker product
+            # w1: (a, b), w2: (c, d) -> result: (a*c, b*d)
+            # torch.kron is (a*c, b*d)
+            delta = torch.kron(w1, w2) * scale
+            
+            # find target layer in model
+            # prefix example: "transformer_blocks.0.attn.add_k_proj"
+            # pipe.transformer matches this structure directly
+            path_parts = prefix.split('.')
+            target = pipe.transformer
+            try:
+                for part in path_parts:
+                    target = getattr(target, part)
+                
+                # check shapes
+                if target.weight.shape == delta.shape:
+                    target.weight.add_(delta) # in-place merge
+                    updates += 1
+                else:
+                    print(f"shape mismatch for {prefix}: model {target.weight.shape} vs lora {delta.shape}")
+            except AttributeError:
+                print(f"layer not found: {prefix}")
+                
+    print(f"successfully injected {updates} lokr layers manually.")
+
+except Exception as e:
+    print(f"lokr injection failed: {e}")
+    print("running with lightning lora only.")
+
+# --- end of surgery ---
 
 # # Apply the same optimizations from the first version
 # pipe.transformer.__class__ = QwenImageTransformer2DModel
