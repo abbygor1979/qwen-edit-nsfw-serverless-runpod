@@ -243,6 +243,12 @@ pipe.load_lora_weights(
 )
 pipe.fuse_lora()
 
+pipe.load_lora_weights(
+        "headlesssetton/kjfakjf", 
+        weight_name="Qwen_Snofs_1_2.safetensors"
+)
+pipe.fuse_lora(lora_scale=1.0) 
+
 # # Apply the same optimizations from the first version
 # pipe.transformer.__class__ = QwenImageTransformer2DModel
 # pipe.transformer.set_attn_processor(QwenDoubleStreamAttnProcessorFA3())
