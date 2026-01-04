@@ -258,72 +258,87 @@ print("lightning lora fused.")
 print("attempting manual lokr injection for snofs...")
 
 try:
-    # download the file directly
+    from safetensors.torch import load_file
+    from huggingface_hub import hf_hub_download
+    
+    # download the file
     lora_path = hf_hub_download(repo_id="headlesssetton/kjfakjf", filename="Qwen_Snofs_1_2.safetensors")
     state_dict = load_file(lora_path)
     
-    # lokr injection parameters
-    lokr_scale = 1.0  # adjust strength here
+    lokr_scale = 1.0
     
-    # iterate and merge
+    # 1. build a map of the model's actual modules to underscore-style names
+    # e.g., "transformer_blocks.0.attn.to_q" -> "transformer_blocks_0_attn_to_q"
+    print("building model layer map...")
+    flat_to_module = {}
+    for name, module in pipe.transformer.named_modules():
+        # we only care about linear layers usually
+        if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
+            flat_name = name.replace(".", "_")
+            flat_to_module[flat_name] = module
+            
+    # 2. iterate and inject
     updates = 0
     with torch.no_grad():
-        # group keys by layer prefix
+        # group keys by prefix
         prefixes = set()
         for key in state_dict.keys():
             if "lokr_w1" in key:
+                # strip suffix
                 prefixes.add(key.replace(".lokr_w1", ""))
         
         for prefix in prefixes:
-            # extract weights and FORCE TO DEVICE
-            w1 = state_dict[f"{prefix}.lokr_w1"].to(device, dtype=dtype)
-            w2 = state_dict[f"{prefix}.lokr_w2"].to(device, dtype=dtype)
-            alpha = state_dict.get(f"{prefix}.alpha", None)
+            # 3. resolve the module from the messy lora name
+            # remove "lora_unet_" prefix if present
+            clean_prefix = prefix.replace("lora_unet_", "")
             
-            # handle scale/alpha math carefully
-            current_scale = lokr_scale
-            if alpha is not None:
-                # alpha is a tensor, move it to gpu
-                if isinstance(alpha, torch.Tensor):
-                    alpha = alpha.to(device, dtype=dtype)
-                current_scale *= (alpha / w1.shape[0])
-
-            # compute delta: kronecker product
-            # w1: (a, b), w2: (c, d) -> result: (a*c, b*d)
-            delta = torch.kron(w1, w2) * current_scale
-            
-            # find target layer in model
-            path_parts = prefix.split('.')
-            target = pipe.transformer
-            
-            layer_found = True
-            try:
-                for part in path_parts:
-                    target = getattr(target, part)
-            except AttributeError:
-                layer_found = False
-            
-            if layer_found:
-                # double check devices before adding
-                if target.weight.device != delta.device:
-                    delta = delta.to(target.weight.device)
+            if clean_prefix in flat_to_module:
+                target_module = flat_to_module[clean_prefix]
                 
-                # check shapes
-                if target.weight.shape == delta.shape:
-                    target.weight.add_(delta) # in-place merge
+                # extract weights
+                w1 = state_dict[f"{prefix}.lokr_w1"].to(device, dtype=dtype)
+                w2 = state_dict[f"{prefix}.lokr_w2"].to(device, dtype=dtype)
+                alpha = state_dict.get(f"{prefix}.alpha", None)
+                
+                # handle alpha/scale
+                current_scale = lokr_scale
+                if alpha is not None:
+                    if isinstance(alpha, torch.Tensor):
+                        alpha = alpha.to(device, dtype=dtype)
+                    # standard lokr scaling
+                    current_scale *= (alpha / w1.shape[0])
+
+                # compute delta (kron product)
+                delta = torch.kron(w1, w2) * current_scale
+                
+                # safety move to target device
+                if delta.device != target_module.weight.device:
+                    delta = delta.to(target_module.weight.device)
+                
+                # inject
+                if target_module.weight.shape == delta.shape:
+                    target_module.weight.add_(delta)
                     updates += 1
                 else:
-                    print(f"shape mismatch for {prefix}: model {target.weight.shape} vs lora {delta.shape}")
+                    # sometimes shapes are transposed in different formats
+                    if target_module.weight.shape == delta.T.shape:
+                        target_module.weight.add_(delta.T)
+                        updates += 1
+                    else:
+                        print(f"shape mismatch for {clean_prefix}: model {target_module.weight.shape} vs lora {delta.shape}")
             else:
-                print(f"layer not found: {prefix}")
-                
+                # debug print only for the first few to avoid spam
+                if updates == 0: 
+                    print(f"could not map lora layer: {prefix} -> {clean_prefix}")
+
     print(f"successfully injected {updates} lokr layers manually.")
 
 except Exception as e:
     import traceback
     traceback.print_exc()
     print(f"lokr injection failed: {e}")
-    print("running with lightning lora only.")
+
+# --- end of surgery ---
 
 # --- end of surgery ---
 
