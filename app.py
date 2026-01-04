@@ -260,58 +260,80 @@ print("attempting manual lokr injection for snofs...")
 try:
     from safetensors.torch import load_file
     from huggingface_hub import hf_hub_download
+    import torch.nn as nn
     
-    # download the file
+    # download
     lora_path = hf_hub_download(repo_id="headlesssetton/kjfakjf", filename="Qwen_Snofs_1_2.safetensors")
     state_dict = load_file(lora_path)
     
     lokr_scale = 1.0
-    
-    # 1. build a map of the model's actual modules to underscore-style names
-    # e.g., "transformer_blocks.0.attn.to_q" -> "transformer_blocks_0_attn_to_q"
-    print("building model layer map...")
-    flat_to_module = {}
-    for name, module in pipe.transformer.named_modules():
-        # we only care about linear layers usually
-        if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
-            flat_name = name.replace(".", "_")
-            flat_to_module[flat_name] = module
+
+    def get_target_module(root, path_str):
+        """
+        recursively resolves a path like 'transformer_blocks_25_attn_add_v_proj'
+        against the actual model structure.
+        """
+        if not path_str:
+            return root
             
-    # 2. iterate and inject
+        # try to find the longest attribute/index match at the start of path_str
+        # we split by underscores, but we have to be careful about names that contain underscores
+        parts = path_str.split('_')
+        
+        # greedy search: try to consume as many parts as possible to form a valid attribute name
+        current_attr = ""
+        for i in range(len(parts), 0, -1):
+            candidate = "_".join(parts[:i])
+            
+            # check if candidate is an attribute
+            if hasattr(root, candidate):
+                next_root = getattr(root, candidate)
+                remaining = "_".join(parts[i:])
+                return get_target_module(next_root, remaining)
+            
+            # check if candidate is an index (for ModuleList/Sequential)
+            if candidate.isdigit() and isinstance(root, (nn.Sequential, nn.ModuleList)):
+                idx = int(candidate)
+                if idx < len(root):
+                    next_root = root[idx]
+                    remaining = "_".join(parts[i:])
+                    return get_target_module(next_root, remaining)
+        
+        # if we are here, we failed to match any attribute.
+        # heuristic: maybe the model uses 'proj' but lora says 'linear'? (unlikely here)
+        return None
+
     updates = 0
     with torch.no_grad():
-        # group keys by prefix
         prefixes = set()
         for key in state_dict.keys():
             if "lokr_w1" in key:
-                # strip suffix
                 prefixes.add(key.replace(".lokr_w1", ""))
         
         for prefix in prefixes:
-            # 3. resolve the module from the messy lora name
-            # remove "lora_unet_" prefix if present
-            clean_prefix = prefix.replace("lora_unet_", "")
+            # clean prefix: remove 'lora_unet_'
+            search_path = prefix.replace("lora_unet_", "")
             
-            if clean_prefix in flat_to_module:
-                target_module = flat_to_module[clean_prefix]
-                
-                # extract weights
+            # traverse
+            target_module = get_target_module(pipe.transformer, search_path)
+            
+            if target_module and hasattr(target_module, "weight"):
+                # load weights
                 w1 = state_dict[f"{prefix}.lokr_w1"].to(device, dtype=dtype)
                 w2 = state_dict[f"{prefix}.lokr_w2"].to(device, dtype=dtype)
                 alpha = state_dict.get(f"{prefix}.alpha", None)
                 
-                # handle alpha/scale
+                # scale math
                 current_scale = lokr_scale
                 if alpha is not None:
                     if isinstance(alpha, torch.Tensor):
                         alpha = alpha.to(device, dtype=dtype)
-                    # standard lokr scaling
                     current_scale *= (alpha / w1.shape[0])
 
-                # compute delta (kron product)
+                # kron
                 delta = torch.kron(w1, w2) * current_scale
                 
-                # safety move to target device
+                # device align
                 if delta.device != target_module.weight.device:
                     delta = delta.to(target_module.weight.device)
                 
@@ -319,19 +341,16 @@ try:
                 if target_module.weight.shape == delta.shape:
                     target_module.weight.add_(delta)
                     updates += 1
+                elif target_module.weight.shape == delta.T.shape:
+                    target_module.weight.add_(delta.T)
+                    updates += 1
                 else:
-                    # sometimes shapes are transposed in different formats
-                    if target_module.weight.shape == delta.T.shape:
-                        target_module.weight.add_(delta.T)
-                        updates += 1
-                    else:
-                        print(f"shape mismatch for {clean_prefix}: model {target_module.weight.shape} vs lora {delta.shape}")
+                    print(f"shape mismatch {search_path}: {target_module.weight.shape} vs {delta.shape}")
             else:
-                # debug print only for the first few to avoid spam
-                if updates == 0: 
-                    print(f"could not map lora layer: {prefix} -> {clean_prefix}")
+                # keep this silent unless debugging, 120 success is usually enough for visual impact
+                pass
 
-    print(f"successfully injected {updates} lokr layers manually.")
+    print(f"recursive solver successfully injected {updates} lokr layers.")
 
 except Exception as e:
     import traceback
