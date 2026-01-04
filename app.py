@@ -253,6 +253,7 @@ pipe.load_lora_weights(
 pipe.fuse_lora()
 print("lightning lora fused.")
 
+
 # --- 2. manual surgery for lokr (snofs) ---
 print("attempting manual lokr injection for snofs...")
 
@@ -274,32 +275,38 @@ try:
                 prefixes.add(key.replace(".lokr_w1", ""))
         
         for prefix in prefixes:
-            # extract weights
+            # extract weights and FORCE TO DEVICE
             w1 = state_dict[f"{prefix}.lokr_w1"].to(device, dtype=dtype)
             w2 = state_dict[f"{prefix}.lokr_w2"].to(device, dtype=dtype)
             alpha = state_dict.get(f"{prefix}.alpha", None)
             
-            # calculate scaling
-            # lokr usually uses alpha / sqrt(rank) or similar, but often just alpha is enough
-            # if alpha is present, scale = alpha / w1.shape[0] (or similar convention)
-            # here we will assume simple multiplication or alpha scaling if provided
-            scale = lokr_scale
+            # handle scale/alpha math carefully
+            current_scale = lokr_scale
             if alpha is not None:
-                scale *= (alpha / w1.shape[0]) # standard lora scaling convention, might vary for lokr
+                # alpha is a tensor, move it to gpu
+                if isinstance(alpha, torch.Tensor):
+                    alpha = alpha.to(device, dtype=dtype)
+                current_scale *= (alpha / w1.shape[0])
 
             # compute delta: kronecker product
             # w1: (a, b), w2: (c, d) -> result: (a*c, b*d)
-            # torch.kron is (a*c, b*d)
-            delta = torch.kron(w1, w2) * scale
+            delta = torch.kron(w1, w2) * current_scale
             
             # find target layer in model
-            # prefix example: "transformer_blocks.0.attn.add_k_proj"
-            # pipe.transformer matches this structure directly
             path_parts = prefix.split('.')
             target = pipe.transformer
+            
+            layer_found = True
             try:
                 for part in path_parts:
                     target = getattr(target, part)
+            except AttributeError:
+                layer_found = False
+            
+            if layer_found:
+                # double check devices before adding
+                if target.weight.device != delta.device:
+                    delta = delta.to(target.weight.device)
                 
                 # check shapes
                 if target.weight.shape == delta.shape:
@@ -307,12 +314,14 @@ try:
                     updates += 1
                 else:
                     print(f"shape mismatch for {prefix}: model {target.weight.shape} vs lora {delta.shape}")
-            except AttributeError:
+            else:
                 print(f"layer not found: {prefix}")
                 
     print(f"successfully injected {updates} lokr layers manually.")
 
 except Exception as e:
+    import traceback
+    traceback.print_exc()
     print(f"lokr injection failed: {e}")
     print("running with lightning lora only.")
 
