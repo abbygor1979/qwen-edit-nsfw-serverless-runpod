@@ -1,340 +1,474 @@
 import gradio as gr
-import os
-import subprocess
-import shutil
-import json
-import time
-from pathlib import Path
+import numpy as np
+import random
 import torch
 import spaces
-from diffusers import DiffusionPipeline
 
-# ==========================================
-# 1. SETUP & GLOBAL VARS
-# ==========================================
+from PIL import Image
+from diffusers import FlowMatchEulerDiscreteScheduler, QwenImageEditPlusPipeline
+# from optimization import optimize_pipeline_
+# from qwenimage.pipeline_qwenimage_edit_plus import QwenImageEditPlusPipeline
+# from qwenimage.transformer_qwenimage import QwenImageTransformer2DModel
+# from qwenimage.qwen_fa3_processor import QwenDoubleStreamAttnProcessorFA3
 
-DATASET_DIR = Path("./datasets")
-OUTPUT_DIR = Path("./output")
-DATASET_DIR.mkdir(exist_ok=True)
-OUTPUT_DIR.mkdir(exist_ok=True)
+from huggingface_hub import InferenceClient
+import math
 
-# global tracking for loras
-# key: friendly name, value: path
-AVAILABLE_LORAS = {} 
+import os
+import base64
+from io import BytesIO
+import json
 
-print("loading z-image-turbo pipeline...")
-pipe = DiffusionPipeline.from_pretrained(
-    "Tongyi-MAI/Z-Image-Turbo",
-    torch_dtype=torch.bfloat16,
-    low_cpu_mem_usage=False,
-)
-pipe.to("cuda")
-print("pipeline loaded!")
+SYSTEM_PROMPT = '''
+# Edit Instruction Rewriter
+You are a professional edit instruction rewriter. Your task is to generate a precise, concise, and visually achievable professional-level edit instruction based on the user-provided instruction and the image to be edited.  
 
-# ==========================================
-# 2. TRAINING LOGIC
-# ==========================================
+Please strictly follow the rewriting rules below:
 
-def check_gpu():
-    if torch.cuda.is_available():
-        return f"✅ gpu available: {torch.cuda.get_device_name(0)}"
-    return "⚠️ no gpu detected"
+## 1. General Principles
+- Keep the rewritten prompt **concise and comprehensive**. Avoid overly long sentences and unnecessary descriptive language.  
+- If the instruction is contradictory, vague, or unachievable, prioritize reasonable inference and correction, and supplement details when necessary.  
+- Keep the main part of the original instruction unchanged, only enhancing its clarity, rationality, and visual feasibility.  
+- All added objects or modifications must align with the logic and style of the scene in the input images.  
+- If multiple sub-images are to be generated, describe the content of each sub-image individually.  
 
-def upload_and_prepare_dataset(files, dataset_name, trigger_word):
-    if not files:
-        return "❌ upload images first", None, ""
-    
-    if not dataset_name:
-        dataset_name = f"dataset_{int(time.time())}"
-    
-    dataset_path = DATASET_DIR / dataset_name
-    dataset_path.mkdir(exist_ok=True, parents=True)
-    
-    image_count = 0
-    for file in files:
-        if file.name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp')):
-            filename = Path(file.name).name
-            dest = dataset_path / filename
-            shutil.copy(file.name, dest)
-            
-            caption_file = dest.with_suffix('.txt')
-            caption_text = trigger_word if trigger_word else "a photo"
-            with open(caption_file, 'w') as f:
-                f.write(caption_text)
-            
-            image_count += 1
-            
-    if image_count == 0:
-        return "❌ no valid images found", None, ""
-        
-    return f"✅ ready: {image_count} images in {dataset_name}", str(dataset_path), dataset_name
+## 2. Task-Type Handling Rules
 
-# request 10 mins gpu for training
-@spaces.GPU(duration=200) 
-def train_lora(
-    dataset_path,
-    project_name,
-    trigger_word,
-    steps,
-    learning_rate,
-    lora_rank,
-    resolution,
-    progress=gr.Progress()
-):
-    if not dataset_path:
-        return "❌ no dataset", None
+### 1. Add, Delete, Replace Tasks
+- If the instruction is clear (already includes task type, target entity, position, quantity, attributes), preserve the original intent and only refine the grammar.  
+- If the description is vague, supplement with minimal but sufficient details (category, color, size, orientation, position, etc.). For example:  
+    > Original: "Add an animal"  
+    > Rewritten: "Add a light-gray cat in the bottom-right corner, sitting and facing the camera"  
+- Remove meaningless instructions: e.g., "Add 0 objects" should be ignored or flagged as invalid.  
+- For replacement tasks, specify "Replace Y with X" and briefly describe the key visual features of X.  
 
-    if not project_name:
-        project_name = f"lora_{int(time.time())}"
-        
-    output_path = OUTPUT_DIR / project_name
-    output_path.mkdir(exist_ok=True, parents=True)
-    
-    # config generation
-    config = {
-        "job": "extension",
-        "config": {
-            "name": project_name,
-            "process": [{
-                "type": "sd_trainer",
-                "training_folder": str(output_path),
-                "device": "cuda:0",
-                "trigger_word": trigger_word or "",
-                "network": {
-                    "type": "lora",
-                    "linear": int(lora_rank),
-                    "linear_alpha": int(lora_rank),
-                },
-                "save": {
-                    "dtype": "float16",
-                    "save_every": int(steps), # save only at end to save space
-                    "max_step_saves_to_keep": 1,
-                },
-                "datasets": [{
-                    "folder_path": dataset_path,
-                    "caption_ext": "txt",
-                    "caption_dropout_rate": 0.05,
-                    "resolution": [int(resolution), int(resolution)],
-                }],
-                "train": {
-                    "batch_size": 1,
-                    "steps": int(steps),
-                    "gradient_accumulation_steps": 1,
-                    "train_unet": True,
-                    "train_text_encoder": False,
-                    "gradient_checkpointing": True,
-                    "noise_scheduler": "flowmatch",
-                    "optimizer": "adamw8bit",
-                    "lr": float(learning_rate),
-                    "ema_config": {"use_ema": True, "ema_decay": 0.99},
-                    "dtype": "bf16",
-                },
-                "model": {
-                    "name_or_path": "Tongyi-MAI/Z-Image-Base",
-                    "is_v_pred": False,
-                    "quantize": True,
-                },
-            }]
-        }
-    }
-    
-    config_path = output_path / "config.json"
-    with open(config_path, 'w') as f:
-        json.dump(config, f, indent=2)
-        
-    # install ai-toolkit
-    progress(0.1, desc="setting up environment...")
-    if not Path("./ai-toolkit").exists():
-        try:
-            subprocess.run(["git", "clone", "https://github.com/ostris/ai-toolkit.git"], check=True)
-            subprocess.run(["pip", "install", "-q", "-r", "ai-toolkit/requirements.txt"], check=True)
-        except Exception as e:
-            return f"❌ setup failed: {e}", None
+### 2. Text Editing Tasks
+- All text content must be enclosed in English double quotes `" "`. Keep the original language of the text, and keep the capitalization.  
+- Both adding new text and replacing existing text are text replacement tasks, For example:  
+    - Replace "xx" to "yy"  
+    - Replace the mask / bounding box to "yy"  
+    - Replace the visual object to "yy"  
+- Specify text position, color, and layout only if user has required.  
+- If font is specified, keep the original language of the font.  
 
-    progress(0.2, desc="training (this takes time)...")
-    
+### 3. Human Editing Tasks
+- Make the smallest changes to the given user's prompt.  
+- If changes to background, action, expression, camera shot, or ambient lighting are required, please list each modification individually.
+- **Edits to makeup or facial features / expression must be subtle, not exaggerated, and must preserve the subject's identity consistency.**
+    > Original: "Add eyebrows to the face"  
+    > Rewritten: "Slightly thicken the person's eyebrows with little change, look natural."
+
+### 4. Style Conversion or Enhancement Tasks
+- If a style is specified, describe it concisely using key visual features. For example:  
+    > Original: "Disco style"  
+    > Rewritten: "1970s disco style: flashing lights, disco ball, mirrored walls, vibrant colors"  
+- For style reference, analyze the original image and extract key characteristics (color, composition, texture, lighting, artistic style, etc.), integrating them into the instruction.  
+- **Colorization tasks (including old photo restoration) must use the fixed template:**  
+  "Restore and colorize the old photo."  
+- Clearly specify the object to be modified. For example:  
+    > Original: Modify the subject in Picture 1 to match the style of Picture 2.  
+    > Rewritten: Change the girl in Picture 1 to the ink-wash style of Picture 2 — rendered in black-and-white watercolor with soft color transitions.
+
+### 5. Material Replacement
+- Clearly specify the object and the material. For example: "Change the material of the apple to papercut style."
+- For text material replacement, use the fixed template:
+    "Change the material of text "xxxx" to laser style"
+
+### 6. Logo/Pattern Editing
+- Material replacement should preserve the original shape and structure as much as possible. For example:
+   > Original: "Convert to sapphire material"  
+   > Rewritten: "Convert the main subject in the image to sapphire material, preserving similar shape and structure"
+- When migrating logos/patterns to new scenes, ensure shape and structure consistency. For example:
+   > Original: "Migrate the logo in the image to a new scene"  
+   > Rewritten: "Migrate the logo in the image to a new scene, preserving similar shape and structure"
+
+### 7. Multi-Image Tasks
+- Rewritten prompts must clearly point out which image's element is being modified. For example:  
+    > Original: "Replace the subject of picture 1 with the subject of picture 2"  
+    > Rewritten: "Replace the girl of picture 1 with the boy of picture 2, keeping picture 2's background unchanged"  
+- For stylization tasks, describe the reference image's style in the rewritten prompt, while preserving the visual content of the source image.  
+
+## 3. Rationale and Logic Check
+- Resolve contradictory instructions: e.g., "Remove all trees but keep all trees" requires logical correction.
+- Supplement missing critical information: e.g., if position is unspecified, choose a reasonable area based on composition (near subject, blank space, center/edge, etc.).
+
+# Output Format Example
+```json
+{
+   "Rewritten": "..."
+}
+'''
+
+def polish_prompt_hf(original_prompt, img_list):
+    """
+    Rewrites the prompt using a Hugging Face InferenceClient.
+    Supports multiple images via img_list.
+    """
+    # Ensure HF_TOKEN is set
+    api_key = os.environ.get("inference_providers")
+    if not api_key:
+        print("Warning: HF_TOKEN not set. Falling back to original prompt.")
+        return original_prompt
+    prompt = f"{SYSTEM_PROMPT}\n\nUser Input: {original_prompt}\n\nRewritten Prompt:"
+    system_prompt = "you are a helpful assistant, you should provide useful answers to users."
     try:
-        # run training script
-        # explicitly passing environment to ensure cuda visibility in subprocess
-        env = os.environ.copy()
+        # Initialize the client
+        client = InferenceClient(
+            provider="nebius",
+            api_key=api_key,
+        )
+
+        # Convert list of images to base64 data URLs
+        image_urls = []
+        if img_list is not None:
+            # Ensure img_list is actually a list
+            if not isinstance(img_list, list):
+                img_list = [img_list]
+            
+            for img in img_list:
+                image_url = None
+                # If img is a PIL Image
+                if hasattr(img, 'save'):  # Check if it's a PIL Image
+                    buffered = BytesIO()
+                    img.save(buffered, format="PNG")
+                    img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                    image_url = f"data:image/png;base64,{img_base64}"
+                # If img is already a file path (string)
+                elif isinstance(img, str):
+                    with open(img, "rb") as image_file:
+                        img_base64 = base64.b64encode(image_file.read()).decode('utf-8')
+                    image_url = f"data:image/png;base64,{img_base64}"
+                else:
+                    print(f"Warning: Unexpected image type: {type(img)}, skipping...")
+                    continue
+                
+                if image_url:
+                    image_urls.append(image_url)
+
+        # Build the content array with text first, then all images
+        content = [
+            {
+                "type": "text",
+                "text": prompt
+            }
+        ]
         
-        proc = subprocess.run(
-            ["python", "ai-toolkit/run.py", str(config_path)],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=3500 
+        # Add all images to the content
+        for image_url in image_urls:
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            })
+
+        # Format the messages for the chat completions API
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": content
+            }
+        ]
+
+        # Call the API
+        completion = client.chat.completions.create(
+            model="Qwen/Qwen2.5-VL-72B-Instruct",
+            messages=messages,
         )
         
-        if proc.returncode != 0:
-            return f"❌ training crashed:\n{proc.stderr}", None
-            
-        # find result
-        lora_files = list(output_path.glob("*.safetensors"))
-        if lora_files:
-            lora_file = lora_files[-1]
-            AVAILABLE_LORAS[project_name] = str(lora_file)
-            
-            # update the dropdown choices dynamically
-            choices = [("None", None)] + [(k, v) for k, v in AVAILABLE_LORAS.items()]
-            
-            return f"✅ trained: {project_name}", str(lora_file)
+        # Parse the response
+        result = completion.choices[0].message.content
         
-        return "⚠️ finished but no safetensors found", None
-
+        # Try to extract JSON if present
+        if '"Rewritten"' in result:
+            try:
+                # Clean up the response
+                result = result.replace('```json', '').replace('```', '')
+                result_json = json.loads(result)
+                polished_prompt = result_json.get('Rewritten', result)
+            except:
+                polished_prompt = result
+        else:
+            polished_prompt = result
+            
+        polished_prompt = polished_prompt.strip().replace("\n", " ")
+        return polished_prompt
+        
     except Exception as e:
-        return f"❌ fatal error: {e}", None
+        print(f"Error during API call to Hugging Face: {e}")
+        # Fallback to original prompt if enhancement fails
+        return original_prompt 
 
-# ==========================================
-# 3. INFERENCE LOGIC
-# ==========================================
 
-@spaces.GPU
-def generate_image(
-    prompt, 
-    height, 
-    width, 
-    steps, 
-    seed, 
-    randomize_seed, 
-    lora_path,
-    lora_scale
+
+def encode_image(pil_image):
+    import io
+    buffered = io.BytesIO()
+    pil_image.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+# --- Model Loading ---
+dtype = torch.bfloat16
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# Scheduler configuration for Lightning
+scheduler_config = {
+    "base_image_seq_len": 256,
+    "base_shift": math.log(3),
+    "invert_sigmas": False,
+    "max_image_seq_len": 8192,
+    "max_shift": math.log(3),
+    "num_train_timesteps": 1000,
+    "shift": 1.0,
+    "shift_terminal": None,
+    "stochastic_sampling": False,
+    "time_shift_type": "exponential",
+    "use_beta_sigmas": False,
+    "use_dynamic_shifting": True,
+    "use_exponential_sigmas": False,
+    "use_karras_sigmas": False,
+}
+
+# Initialize scheduler with Lightning config
+scheduler = FlowMatchEulerDiscreteScheduler.from_config(scheduler_config)
+
+# Load the model pipeline
+pipe = QwenImageEditPlusPipeline.from_pretrained("Qwen/Qwen-Image-Edit-2511", 
+                                                 scheduler=scheduler,
+                                                 torch_dtype=dtype).to(device)
+pipe.load_lora_weights(
+        "lightx2v/Qwen-Image-Edit-2511-Lightning", 
+        weight_name="Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+)
+pipe.fuse_lora()
+
+# # Apply the same optimizations from the first version
+# pipe.transformer.__class__ = QwenImageTransformer2DModel
+# pipe.transformer.set_attn_processor(QwenDoubleStreamAttnProcessorFA3())
+
+# # --- Ahead-of-time compilation ---
+# optimize_pipeline_(pipe, image=[Image.new("RGB", (1024, 1024)), Image.new("RGB", (1024, 1024))], prompt="prompt")
+
+# --- UI Constants and Helpers ---
+MAX_SEED = np.iinfo(np.int32).max
+
+def use_output_as_input(output_images):
+    """Convert output images to input format for the gallery"""
+    if output_images is None or len(output_images) == 0:
+        return []
+    return output_images
+
+# --- Main Inference Function (with hardcoded negative prompt) ---
+@spaces.GPU()
+def infer(
+    images,
+    prompt,
+    seed=42,
+    randomize_seed=False,
+    true_guidance_scale=1.0,
+    num_inference_steps=4,
+    height=None,
+    width=None,
+    rewrite_prompt=True,
+    num_images_per_prompt=1,
+    progress=gr.Progress(track_tqdm=True),
 ):
-    # handle lora loading/unloading
-    pipe.unload_lora_weights() # clean slate
-    
-    if lora_path and os.path.exists(lora_path):
-        print(f"loading lora: {lora_path}")
-        try:
-            pipe.load_lora_weights(lora_path)
-            # manual scaling not always supported directly without fuse, 
-            # but usually applied by default. 
-            # for simplicitly we just load it.
-        except Exception as e:
-            print(f"lora load failed: {e}")
+    """
+    Run image-editing inference using the Qwen-Image-Edit pipeline.
 
+    Parameters:
+        images (list): Input images from the Gradio gallery (PIL or path-based).
+        prompt (str): Editing instruction (may be rewritten by LLM if enabled).
+        seed (int): Random seed for reproducibility.
+        randomize_seed (bool): If True, overrides seed with a random value.
+        true_guidance_scale (float): CFG scale used by Qwen-Image.
+        num_inference_steps (int): Number of diffusion steps.
+        height (int | None): Optional output height override.
+        width (int | None): Optional output width override.
+        rewrite_prompt (bool): Whether to rewrite the prompt using Qwen-2.5-VL.
+        num_images_per_prompt (int): Number of images to generate.
+        progress: Gradio progress callback.
+
+    Returns:
+        tuple: (generated_images, seed_used, UI_visibility_update)
+    """
+    
+    # Hardcode the negative prompt as requested
+    negative_prompt = " "
+    
     if randomize_seed:
-        seed = torch.randint(0, 2**32 - 1, (1,)).item()
+        seed = random.randint(0, MAX_SEED)
+
+    # Set up the generator for reproducibility
+    generator = torch.Generator(device=device).manual_seed(seed)
     
-    generator = torch.Generator("cuda").manual_seed(int(seed))
+    # Load input images into PIL Images
+    pil_images = []
+    if images is not None:
+        for item in images:
+            try:
+                if isinstance(item[0], Image.Image):
+                    pil_images.append(item[0].convert("RGB"))
+                elif isinstance(item[0], str):
+                    pil_images.append(Image.open(item[0]).convert("RGB"))
+                elif hasattr(item, "name"):
+                    pil_images.append(Image.open(item.name).convert("RGB"))
+            except Exception:
+                continue
+
+    if height==256 and width==256:
+        height, width = None, None
+    print(f"Calling pipeline with prompt: '{prompt}'")
+    print(f"Negative Prompt: '{negative_prompt}'")
+    print(f"Seed: {seed}, Steps: {num_inference_steps}, Guidance: {true_guidance_scale}, Size: {width}x{height}")
+    if rewrite_prompt and len(pil_images) > 0:
+        prompt = polish_prompt_hf(prompt, pil_images)
+        print(f"Rewritten Prompt: {prompt}")
     
+
+    # Generate the image
     image = pipe(
+        image=pil_images if len(pil_images) > 0 else None,
         prompt=prompt,
-        height=int(height),
-        width=int(width),
-        num_inference_steps=int(steps),
-        guidance_scale=0.0,
+        height=height,
+        width=width,
+        negative_prompt=negative_prompt,
+        num_inference_steps=num_inference_steps,
         generator=generator,
-    ).images[0]
-    
-    return image, seed
+        true_cfg_scale=true_guidance_scale,
+        num_images_per_prompt=num_images_per_prompt,
+    ).images
 
-def update_lora_list():
-    """helper to refresh dropdown"""
-    choices = [("None", None)] + [(k, v) for k, v in AVAILABLE_LORAS.items()]
-    return gr.Dropdown(choices=choices)
+    # Return images, seed, and make button visible
+    return image, seed, gr.update(visible=True)
 
-# ==========================================
-# 4. UI CONSTRUCTION
-# ==========================================
+# --- Examples and UI Layout ---
+examples = []
 
-custom_theme = gr.themes.Soft(primary_hue="yellow", secondary_hue="slate")
+css = """
+#col-container {
+    margin: 0 auto;
+    max-width: 1024px;
+}
+#logo-title {
+    text-align: center;
+}
+#logo-title img {
+    width: 400px;
+}
+#edit_text{margin-top: -62px !important}
+"""
 
-with gr.Blocks(theme=custom_theme, title="Z-Image ZeroGPU Trainer") as demo:
-    
-    gr.Markdown("# ⚡ Z-Image-Turbo: Train & Test")
-    
-    with gr.Tabs():
-        
-        # TAB 1: INFERENCE
-        with gr.Tab("🎨 Generate"):
+with gr.Blocks(css=css) as demo:
+    with gr.Column(elem_id="col-container"):
+        gr.HTML("""
+        <div id="logo-title">
+            <img src="https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-Image/qwen_image_edit_logo.png" alt="Qwen-Image Edit Logo" width="400" style="display: block; margin: 0 auto;">
+            <h2 style="font-style: italic;color: #5b47d1;margin-top: -27px !important;margin-left: 96px">[Plus] Fast, 4-steps with LightX2V LoRA</h2>
+        </div>
+        """)
+        gr.Markdown("""
+        [Learn more](https://github.com/QwenLM/Qwen-Image) about the Qwen-Image series. 
+        This demo uses the new [Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) with the [Qwen-Image-Lightning-2511](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning) LoRA for accelerated inference.
+        Try on [Qwen Chat](https://chat.qwen.ai/), or [download model](https://huggingface.co/Qwen/Qwen-Image-Edit-2509) to run locally with ComfyUI or diffusers.
+        """)
+        with gr.Row():
+            with gr.Column():
+                input_images = gr.Gallery(label="Input Images", 
+                                          show_label=False, 
+                                          type="pil", 
+                                          interactive=True)
+
+            with gr.Column():
+                result = gr.Gallery(label="Result", show_label=False, type="pil", interactive=False)
+                # Add this button right after the result gallery - initially hidden
+                use_output_btn = gr.Button("↗️ Use as input", variant="secondary", size="sm", visible=False)
+
+        with gr.Row():
+            prompt = gr.Text(
+                    label="Prompt",
+                    show_label=False,
+                    placeholder="describe the edit instruction",
+                    container=False,
+            )
+            run_button = gr.Button("Edit!", variant="primary")
+
+        with gr.Accordion("Advanced Settings", open=False):
+            # Negative prompt UI element is removed here
+
+            seed = gr.Slider(
+                label="Seed",
+                minimum=0,
+                maximum=MAX_SEED,
+                step=1,
+                value=0,
+            )
+
+            randomize_seed = gr.Checkbox(label="Randomize seed", value=True)
+
             with gr.Row():
-                with gr.Column():
-                    prompt_input = gr.Textbox(label="Prompt", lines=3)
-                    
-                    with gr.Row():
-                        lora_selector = gr.Dropdown(
-                            label="Select LoRA",
-                            choices=[("None", None)],
-                            value=None,
-                            interactive=True
-                        )
-                        refresh_btn = gr.Button("🔄", size="sm", scale=0)
-                    
-                    with gr.Accordion("Settings", open=False):
-                        h_slider = gr.Slider(512, 2048, 1024, step=64, label="Height")
-                        w_slider = gr.Slider(512, 2048, 1024, step=64, label="Width")
-                        steps_slider = gr.Slider(1, 50, 9, step=1, label="Steps")
-                        seed_num = gr.Number(42, label="Seed")
-                        rand_seed = gr.Checkbox(True, label="Randomize Seed")
 
-                    gen_btn = gr.Button("Generate", variant="primary")
+                true_guidance_scale = gr.Slider(
+                    label="True guidance scale",
+                    minimum=1.0,
+                    maximum=10.0,
+                    step=0.1,
+                    value=1.0
+                )
+
+                num_inference_steps = gr.Slider(
+                    label="Number of inference steps",
+                    minimum=1,
+                    maximum=40,
+                    step=1,
+                    value=4,
+                )
                 
-                with gr.Column():
-                    out_img = gr.Image(label="Result")
-                    out_seed = gr.Number(label="Seed Used")
-
-        # TAB 2: TRAINING
-        with gr.Tab("🏋️ Train LoRA"):
-            gr.Markdown("⚠️ **Note:** Requires paid GPU space for long timeouts.")
-            
-            with gr.Row():
-                with gr.Column():
-                    train_files = gr.Files(label="Images", file_types=["image"])
-                    train_name = gr.Textbox(label="Project Name", value="my_lora")
-                    train_trigger = gr.Textbox(label="Trigger Word", value="ohwx")
-                    
-                    # hidden state for dataset path
-                    dataset_path_state = gr.State()
-                    
-                    upload_btn = gr.Button("1. Process Dataset")
-                    upload_status = gr.Textbox(label="Dataset Status")
-                    
-                    gr.Markdown("---")
-                    
-                    train_steps = gr.Slider(100, 2000, 500, step=100, label="Steps")
-                    train_lr = gr.Slider(1e-5, 1e-3, 1e-4, step=1e-5, label="Learning Rate")
-                    train_rank = gr.Slider(4, 128, 16, step=4, label="Rank")
-                    
-                    start_train_btn = gr.Button("2. Start Training", variant="stop")
+                height = gr.Slider(
+                    label="Height",
+                    minimum=256,
+                    maximum=2048,
+                    step=8,
+                    value=None,
+                )
                 
-                with gr.Column():
-                    train_log = gr.Textbox(label="Training Log", lines=10)
-                    lora_file_download = gr.File(label="Download LoRA")
+                width = gr.Slider(
+                    label="Width",
+                    minimum=256,
+                    maximum=2048,
+                    step=8,
+                    value=None,
+                )
+                
+                
+                rewrite_prompt = gr.Checkbox(label="Rewrite prompt", value=True)
 
-    # WIRING
-    
-    # Refresh LoRA list
-    refresh_btn.click(update_lora_list, outputs=lora_selector)
-    
-    # Upload
-    upload_btn.click(
-        upload_and_prepare_dataset,
-        [train_files, train_name, train_trigger],
-        [upload_status, dataset_path_state, train_name]
-    )
-    
-    # Train
-    def on_train_complete(status, file_path):
-        # Update available loras list immediately after training
-        new_choices = [("None", None)] + [(k, v) for k, v in AVAILABLE_LORAS.items()]
-        return status, file_path, gr.Dropdown(choices=new_choices)
+        # gr.Examples(examples=examples, inputs=[prompt], outputs=[result, seed], fn=infer, cache_examples=False)
 
-    start_train_btn.click(
-        train_lora,
-        [dataset_path_state, train_name, train_trigger, train_steps, train_lr, train_rank, h_slider], # reusing h_slider for res
-        [train_log, lora_file_download]
-    ).then(
-        update_lora_list,
-        outputs=[lora_selector]
+    gr.on(
+        triggers=[run_button.click, prompt.submit],
+        fn=infer,
+        inputs=[
+            input_images,
+            prompt,
+            seed,
+            randomize_seed,
+            true_guidance_scale,
+            num_inference_steps,
+            height,
+            width,
+            rewrite_prompt,
+        ],
+        outputs=[result, seed, use_output_btn],  # Added use_output_btn to outputs
     )
-    
-    # Generate
-    gen_btn.click(
-        generate_image,
-        [prompt_input, h_slider, w_slider, steps_slider, seed_num, rand_seed, lora_selector, train_lr], # train_lr dummy
-        [out_img, out_seed]
+
+    # Add the new event handler for the "Use Output as Input" button
+    use_output_btn.click(
+        fn=use_output_as_input,
+        inputs=[result],
+        outputs=[input_images]
     )
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(mcp_server=True)
