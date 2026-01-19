@@ -245,12 +245,12 @@ pipe = QwenImageEditPlusPipeline.from_pretrained(
     torch_dtype=dtype
 ).to(device)
 
-print("loading lightning lora...")
-pipe.load_lora_weights(
-    "lightx2v/Qwen-Image-Edit-2511-Lightning", 
-    weight_name="Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
-)
-pipe.fuse_lora()
+# print("loading lightning lora...")
+# pipe.load_lora_weights(
+#     "lightx2v/Qwen-Image-Edit-2511-Lightning", 
+#     weight_name="Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+# )
+# pipe.fuse_lora()
 print("lightning lora fused.")
 
 
@@ -296,8 +296,8 @@ def infer(
     prompt,
     seed=42,
     randomize_seed=False,
-    true_guidance_scale=1.0,
-    num_inference_steps=4,
+    true_guidance_scale=4.0,
+    num_inference_steps=40,
     height=None,
     width=None,
     rewrite_prompt=True,
