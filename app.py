@@ -238,13 +238,96 @@ from safetensors.torch import load_file
 from huggingface_hub import hf_hub_download
 import torch.nn.functional as F
 
-# --- 1. setup pipeline with lightning (this works fine) ---
-pipe = QwenImageEditPlusPipeline.from_single_file(
-    "path/to/Qwen-Rapid-AIO-NSFW-v21.safetensors",
-    original_config="Qwen/Qwen-Image-Edit-2511", # pulls the config from the base repo
-    scheduler=scheduler,
-    torch_dtype=torch.bfloat16 # use bf16 for speed on zerogpu
+
+
+
+
+
+
+
+
+
+
+
+
+#################################
+
+
+
+v21_path = hf_hub_download(
+    repo_id="Phr00t/Qwen-Image-Edit-Rapid-AIO",
+    filename="v21/Qwen-Rapid-AIO-NSFW-v21.safetensors",
+    repo_type="model"
+)
+print(f"file ready at: {v21_path}")
+
+# 2. load the base architecture from the official qwen repo
+# we need this to create the skeleton of the model
+print("loading base pipeline architecture...")
+pipe = QwenImageEditPlusPipeline.from_pretrained(
+    "Qwen/Qwen-Image-Edit-2511",
+    scheduler=EulerAncestralDiscreteScheduler.from_pretrained(
+        "Qwen/Qwen-Image-Edit-2511", 
+        subfolder="scheduler"
+    ),
+    torch_dtype=torch.bfloat16
 ).to("cuda")
+
+# 3. load the v21 weights
+print("loading v21 weights into memory...")
+state_dict = load_file(v21_path)
+
+# 4. filter and inject weights
+# the AIO file is a "frankenstein" merge of unet, vae, and text encoder.
+# we need to map the keys correctly. comfyui keys usually differ from diffusers keys.
+
+# we attempt to load the diffusion model (transformer) first as it's the most critical
+print("grafting weights onto the pipeline...")
+try:
+    # try loading into the transformer/unet component
+    # most comfyui merges for this model flatten the keys.
+    # we use strict=False to ignore VAE/CLIP keys that might be in the file but belong elsewhere
+    if hasattr(pipe, "transformer"):
+        # standard 2511 naming
+        incompatible = pipe.transformer.load_state_dict(state_dict, strict=False)
+    elif hasattr(pipe, "unet"):
+        # older 2509 naming
+        incompatible = pipe.unet.load_state_dict(state_dict, strict=False)
+    else:
+        # absolute fallback: try to load to the root modules
+        # this iterates through the pipe and tries to match keys to submodules
+        for name, module in pipe.named_children():
+            if "model" in name or "transformer" in name or "unet" in name:
+                print(f"attempting load into: {name}")
+                module.load_state_dict(state_dict, strict=False)
+
+    print("success. v21 weights are active.")
+
+except Exception as e:
+    print(f"major error during weight loading: {e}")
+    print("attempting root load (desperation mode)...")
+    pipe.load_state_dict(state_dict, strict=False)
+
+# 5. cleanup and optimize
+del state_dict
+gc.collect()
+torch.cuda.empty_cache()
+
+
+
+
+
+#################################
+
+
+
+# # --- 1. setup pipeline with lightning (this works fine) ---
+# pipe = QwenImageEditPlusPipeline.from_single_file(
+#     "path/to/Qwen-Rapid-AIO-NSFW-v21.safetensors",
+#     original_config="Qwen/Qwen-Image-Edit-2511", # pulls the config from the base repo
+#     scheduler=scheduler,
+#     torch_dtype=torch.bfloat16 # use bf16 for speed on zerogpu
+# ).to("cuda")
 
 # print("loading lightning lora...")
 # pipe.load_lora_weights(
