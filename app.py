@@ -239,19 +239,20 @@ from huggingface_hub import hf_hub_download
 import torch.nn.functional as F
 
 # --- 1. setup pipeline with lightning (this works fine) ---
-pipe = QwenImageEditPlusPipeline.from_pretrained(
-    "Qwen/Qwen-Image-Edit-2511", 
+pipe = QwenImageEditPlusPipeline.from_single_file(
+    "path/to/Qwen-Rapid-AIO-NSFW-v21.safetensors",
+    original_config="Qwen/Qwen-Image-Edit-2511", # pulls the config from the base repo
     scheduler=scheduler,
-    torch_dtype=dtype
-).to(device)
+    torch_dtype=torch.bfloat16 # use bf16 for speed on zerogpu
+).to("cuda")
 
-print("loading lightning lora...")
-pipe.load_lora_weights(
-    "lightx2v/Qwen-Image-Edit-2511-Lightning", 
-    weight_name="Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
-)
-pipe.fuse_lora()
-print("lightning lora fused.")
+# print("loading lightning lora...")
+# pipe.load_lora_weights(
+#     "lightx2v/Qwen-Image-Edit-2511-Lightning", 
+#     weight_name="Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+# )
+# pipe.fuse_lora()
+# print("lightning lora fused.")
 
 
 # # Apply the same optimizations from the first version
