@@ -290,7 +290,7 @@ def use_output_as_input(output_images):
     return output_images
 
 # --- Main Inference Function (with hardcoded negative prompt) ---
-@spaces.GPU()
+@spaces.GPU(duration=180)
 def infer(
     images,
     prompt,
