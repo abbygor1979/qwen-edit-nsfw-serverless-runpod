@@ -259,57 +259,62 @@ v21_path = hf_hub_download(
     filename="v21/Qwen-Rapid-AIO-NSFW-v21.safetensors",
     repo_type="model"
 )
-print(f"file ready at: {v21_path}")
 
-# 2. load the base architecture from the official qwen repo
-# we need this to create the skeleton of the model
+# 2. load the base architecture
+# we use the default flowmatch scheduler first to ensure the pipe inits correctly, 
+# then we swap it to euler_a later
 print("loading base pipeline architecture...")
 pipe = QwenImageEditPlusPipeline.from_pretrained(
     "Qwen/Qwen-Image-Edit-2511",
-    scheduler=EulerAncestralDiscreteScheduler.from_pretrained(
-        "Qwen/Qwen-Image-Edit-2511", 
-        subfolder="scheduler"
-    ),
     torch_dtype=torch.bfloat16
 ).to("cuda")
 
-# 3. load the v21 weights
-print("loading v21 weights into memory...")
+# 3. switch scheduler to Euler Ancestral (Lightning requirement)
+# we configure it with the base config to keep timestep spacing correct
+pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+
+# 4. load the massive 28GB v21 weights
+print(f"loading v21 weights from {v21_path}...")
 state_dict = load_file(v21_path)
 
-# 4. filter and inject weights
-# the AIO file is a "frankenstein" merge of unet, vae, and text encoder.
-# we need to map the keys correctly. comfyui keys usually differ from diffusers keys.
+# 5. The "Brutal" Injection
+# Because this is an AIO file, keys might be prefixed with "model." or "transformer." 
+# or they might match the pipeline exactly. We try the root load first.
+print("injecting AIO weights...")
 
-# we attempt to load the diffusion model (transformer) first as it's the most critical
-print("grafting weights onto the pipeline...")
-try:
-    # try loading into the transformer/unet component
-    # most comfyui merges for this model flatten the keys.
-    # we use strict=False to ignore VAE/CLIP keys that might be in the file but belong elsewhere
-    if hasattr(pipe, "transformer"):
-        # standard 2511 naming
-        incompatible = pipe.transformer.load_state_dict(state_dict, strict=False)
-    elif hasattr(pipe, "unet"):
-        # older 2509 naming
-        incompatible = pipe.unet.load_state_dict(state_dict, strict=False)
+# clean up keys if necessary (common in comfyui > diffusers conversions)
+# this removes 'model.diffusion_model.' prefixes if they exist to match diffusers 'transformer.'
+new_state_dict = {}
+for k, v in state_dict.items():
+    if k.startswith("model.diffusion_model."):
+        new_key = k.replace("model.diffusion_model.", "transformer.")
+        new_state_dict[new_key] = v
+    elif k.startswith("first_stage_model."):
+        new_key = k.replace("first_stage_model.", "vae.")
+        new_state_dict[new_key] = v
+    elif k.startswith("conditioner.embedders.0."):
+        new_key = k.replace("conditioner.embedders.0.", "text_encoder.")
+        new_state_dict[new_key] = v
     else:
-        # absolute fallback: try to load to the root modules
-        # this iterates through the pipe and tries to match keys to submodules
-        for name, module in pipe.named_children():
-            if "model" in name or "transformer" in name or "unet" in name:
-                print(f"attempting load into: {name}")
-                module.load_state_dict(state_dict, strict=False)
+        new_state_dict[k] = v
 
-    print("success. v21 weights are active.")
+# if no keys were renamed, just use the original
+if len(new_state_dict) == len(state_dict):
+    final_dict = state_dict
+else:
+    print("detected comfyui keys, remapped for diffusers.")
+    final_dict = new_state_dict
 
-except Exception as e:
-    print(f"major error during weight loading: {e}")
-    print("attempting root load (desperation mode)...")
-    pipe.load_state_dict(state_dict, strict=False)
+# attempt load
+mismatched = pipe.load_state_dict(final_dict, strict=False)
+print("weights loaded.")
+print(f"missing keys (ignore if just config/aux): {len(mismatched.missing_keys)}")
+print(f"unexpected keys (ignore if comfy artifacts): {len(mismatched.unexpected_keys)}")
 
-# 5. cleanup and optimize
+# 6. cleanup
 del state_dict
+del new_state_dict
+del final_dict
 gc.collect()
 torch.cuda.empty_cache()
 
