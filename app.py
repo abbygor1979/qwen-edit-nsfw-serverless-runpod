@@ -245,32 +245,13 @@ pipe = QwenImageEditPlusPipeline.from_pretrained(
     torch_dtype=dtype
 ).to(device)
 
-# print("loading lightning lora...")
-# pipe.load_lora_weights(
-#     "lightx2v/Qwen-Image-Edit-2511-Lightning", 
-#     weight_name="Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
-# )
-# pipe.fuse_lora()
+print("loading lightning lora...")
+pipe.load_lora_weights(
+    "lightx2v/Qwen-Image-Edit-2511-Lightning", 
+    weight_name="Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+)
+pipe.fuse_lora()
 print("lightning lora fused.")
-
-
-
-# 2. download and load the mcnl lora
-print("downloading qwen_mcnl_v1.0...")
-try:
-    # the file is buried deep, so we fetch it by exact path
-    lora_path = hf_hub_download(
-        repo_id="Chroma111/CivitAI-Archive-2", 
-        filename="1851673/2105899/qwen_MCNL_v1.0.safetensors"
-    )
-    
-    # load it into the pipeline
-    pipe.load_lora_weights(lora_path)
-    pipe.fuse_lora(lora_scale=1.0) # bake it in
-    print("mcnl lora loaded and fused.")
-    
-except Exception as e:
-    print(f"failed to load mcnl lora: {e}")
 
 
 # # Apply the same optimizations from the first version
@@ -290,14 +271,14 @@ def use_output_as_input(output_images):
     return output_images
 
 # --- Main Inference Function (with hardcoded negative prompt) ---
-@spaces.GPU(duration=180)
+@spaces.GPU()
 def infer(
     images,
     prompt,
     seed=42,
     randomize_seed=False,
-    true_guidance_scale=4.0,
-    num_inference_steps=40,
+    true_guidance_scale=1.0,
+    num_inference_steps=4,
     height=None,
     width=None,
     rewrite_prompt=True,
