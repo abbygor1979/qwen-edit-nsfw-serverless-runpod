@@ -273,7 +273,7 @@ pipe = QwenImageEditPlusPipeline.from_pretrained(
 ).to("cuda")
 
 # force euler ancestral scheduler
-pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+#pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
 
 # 2. DOWNLOAD & LOAD RAW WEIGHTS
 # ------------------------------------------------------------------------------
