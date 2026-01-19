@@ -266,67 +266,102 @@ import torch.nn.functional as F
 
 
 
-v21_path = hf_hub_download(
-    repo_id="Phr00t/Qwen-Image-Edit-Rapid-AIO",
-    filename="v21/Qwen-Rapid-AIO-NSFW-v21.safetensors",
-    repo_type="model"
-)
-
-# 2. load the base architecture
-# we use the default flowmatch scheduler first to ensure the pipe inits correctly, 
-# then we swap it to euler_a later
 print("loading base pipeline architecture...")
 pipe = QwenImageEditPlusPipeline.from_pretrained(
     "Qwen/Qwen-Image-Edit-2511",
     torch_dtype=torch.bfloat16
 ).to("cuda")
 
-# 3. switch scheduler to Euler Ancestral (Lightning requirement)
-# we configure it with the base config to keep timestep spacing correct
+# force euler ancestral scheduler
 pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
 
-# 4. load the massive 28GB v21 weights
-print(f"loading v21 weights from {v21_path}...")
+# 2. DOWNLOAD & LOAD RAW WEIGHTS
+# ------------------------------------------------------------------------------
+print("accessing v21 checkpoint...")
+v21_path = hf_hub_download(
+    repo_id="Phr00t/Qwen-Image-Edit-Rapid-AIO",
+    filename="v21/Qwen-Rapid-AIO-NSFW-v21.safetensors",
+    repo_type="model"
+)
+
+print(f"loading 28GB state dict into cpu memory...")
 state_dict = load_file(v21_path)
 
-# 5. The "Brutal" Injection
-# Because this is an AIO file, keys might be prefixed with "model." or "transformer." 
-# or they might match the pipeline exactly. We try the root load first.
-print("injecting AIO weights...")
+# 3. DYNAMIC COMPONENT MAPPING (NO ASSUMPTIONS)
+# ------------------------------------------------------------------------------
+print("sorting weights into components...")
 
-# clean up keys if necessary (common in comfyui > diffusers conversions)
-# this removes 'model.diffusion_model.' prefixes if they exist to match diffusers 'transformer.'
-new_state_dict = {}
+# containers for the sorted weights
+transformer_weights = {}
+vae_weights = {}
+text_encoder_weights = {}
+
+# analyze the first key to determine the format
+first_key = next(iter(state_dict.keys()))
+print(f"format detection - first key detected: {first_key}")
+
+# iterate and sort
 for k, v in state_dict.items():
+    # MAPPING: TRANSFORMER
+    # ComfyUI usually prefixes with 'model.diffusion_model.'
     if k.startswith("model.diffusion_model."):
-        new_key = k.replace("model.diffusion_model.", "transformer.")
-        new_state_dict[new_key] = v
+        new_key = k.replace("model.diffusion_model.", "")
+        transformer_weights[new_key] = v
+    # Or sometimes just 'transformer.' or 'model.'
+    elif k.startswith("transformer."):
+        new_key = k.replace("transformer.", "")
+        transformer_weights[new_key] = v
+    
+    # MAPPING: VAE
+    # ComfyUI prefix: 'first_stage_model.'
     elif k.startswith("first_stage_model."):
-        new_key = k.replace("first_stage_model.", "vae.")
-        new_state_dict[new_key] = v
-    elif k.startswith("conditioner.embedders.0."):
-        new_key = k.replace("conditioner.embedders.0.", "text_encoder.")
-        new_state_dict[new_key] = v
-    else:
-        new_state_dict[k] = v
+        new_key = k.replace("first_stage_model.", "")
+        vae_weights[new_key] = v
+    # Diffusers prefix: 'vae.'
+    elif k.startswith("vae."):
+        new_key = k.replace("vae.", "")
+        vae_weights[new_key] = v
 
-# if no keys were renamed, just use the original
-if len(new_state_dict) == len(state_dict):
-    final_dict = state_dict
+    # MAPPING: TEXT ENCODER
+    # ComfyUI prefix: 'conditioner.embedders.' or 'text_encoder.'
+    elif "text_encoder" in k or "conditioner" in k:
+        # this is tricky, we try to keep the suffix
+        if "conditioner.embedders.0." in k:
+            new_key = k.replace("conditioner.embedders.0.", "")
+            text_encoder_weights[new_key] = v
+        elif "text_encoder." in k:
+            new_key = k.replace("text_encoder.", "")
+            text_encoder_weights[new_key] = v
+
+# 4. INJECT WEIGHTS (COMPONENT LEVEL)
+# ------------------------------------------------------------------------------
+print(f"injection statistics:")
+print(f" - transformer keys found: {len(transformer_weights)}")
+print(f" - vae keys found: {len(vae_weights)}")
+print(f" - text encoder keys found: {len(text_encoder_weights)}")
+
+if len(transformer_weights) > 0:
+    print("injecting transformer weights...")
+    msg = pipe.transformer.load_state_dict(transformer_weights, strict=False)
+    print(f"transformer missing keys: {len(msg.missing_keys)}")
 else:
-    print("detected comfyui keys, remapped for diffusers.")
-    final_dict = new_state_dict
+    print("CRITICAL WARNING: no transformer weights found in file. check mapping logic.")
 
-# attempt load
-mismatched = pipe.load_state_dict(final_dict, strict=False)
-print("weights loaded.")
-print(f"missing keys (ignore if just config/aux): {len(mismatched.missing_keys)}")
-print(f"unexpected keys (ignore if comfy artifacts): {len(mismatched.unexpected_keys)}")
+if len(vae_weights) > 0:
+    print("injecting vae weights...")
+    pipe.vae.load_state_dict(vae_weights, strict=False)
 
-# 6. cleanup
+if len(text_encoder_weights) > 0:
+    print("injecting text encoder weights...")
+    # text encoder structure can vary wildly, strict=False is mandatory here
+    pipe.text_encoder.load_state_dict(text_encoder_weights, strict=False)
+
+# 5. CLEANUP & RUN
+# ------------------------------------------------------------------------------
 del state_dict
-del new_state_dict
-del final_dict
+del transformer_weights
+del vae_weights
+del text_encoder_weights
 gc.collect()
 torch.cuda.empty_cache()
 
