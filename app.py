@@ -277,15 +277,15 @@ pipe = QwenImageEditPlusPipeline.from_pretrained(
 
 # 2. DOWNLOAD & LOAD RAW WEIGHTS
 # ------------------------------------------------------------------------------
-print("accessing v21 checkpoint...")
-v21_path = hf_hub_download(
+print("accessing v23 checkpoint...")
+v23_path = hf_hub_download(
     repo_id="Phr00t/Qwen-Image-Edit-Rapid-AIO",
-    filename="v21/Qwen-Rapid-AIO-NSFW-v21.safetensors",
+    filename="v23/Qwen-Rapid-AIO-NSFW-v23.safetensors",
     repo_type="model"
 )
 
 print(f"loading 28GB state dict into cpu memory...")
-state_dict = load_file(v21_path)
+state_dict = load_file(v23_path)
 
 # 3. DYNAMIC COMPONENT MAPPING (NO ASSUMPTIONS)
 # ------------------------------------------------------------------------------
