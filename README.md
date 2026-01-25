@@ -1,5 +1,5 @@
 ---
-title: Qwen Image Edit Rapid AIO (NSFW)
+title: Q
 emoji: 🌍
 colorFrom: pink
 colorTo: pink
