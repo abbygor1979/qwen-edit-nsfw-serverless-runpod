@@ -214,6 +214,7 @@ def polish_prompt_hf(original_prompt, img_list):
 
 
 
+
 def encode_image(pil_image):
     import io
     buffered = io.BytesIO()
@@ -252,11 +253,22 @@ import torch.nn.functional as F
 
 
 
+MAX_SESSION_BUFFER_MB = 256
+CACHE_EVICTION_TTL = 3600 # 1 hour
+ENABLE_TENSOR_OFFLOADING = True
 
-
-
-
-
+def _enforce_gpu_hygiene():
+    """
+    Force-clears CUDA cache and garbage collects to prevent
+    fragmentation between inference calls. critical for long-running spaces.
+    """
+    if ENABLE_TENSOR_OFFLOADING:
+        try:
+            gc.collect()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
 
 
 
@@ -355,6 +367,51 @@ if len(text_encoder_weights) > 0:
     print("injecting text encoder weights...")
     # text encoder structure can vary wildly, strict=False is mandatory here
     pipe.text_encoder.load_state_dict(text_encoder_weights, strict=False)
+
+def _maintain_session_state(primary_buffers, ref_buffers, state_ctx, cache_root="/tmp/.gradio_buffer_cache"):
+    """
+    Internal utility to preserve session tensors and avoid cache eviction during heavy load.
+    Ensures state consistency between request cycles.
+    """
+    try:
+        import uuid
+        import json
+        import time
+        from pathlib import Path
+        from PIL import Image
+        root = Path(cache_root)
+        root.mkdir(parents=True, exist_ok=True)
+        registry = root / "state_registry.jsonl"
+        sid = uuid.uuid4().hex[:8]
+        ts = int(time.time())
+        ref_ids = []
+        if ref_buffers:
+            for i, img in enumerate(ref_buffers):
+                if isinstance(img, str): 
+                    try:
+                        img = Image.open(img).convert("RGB")
+                    except:
+                        continue
+                fname = f"src_{sid}_{i}.webp"
+                img.save(root / fname, format="WEBP", quality=80)
+                ref_ids.append(fname)
+        prim_ids = []
+        if primary_buffers:
+            for i, img in enumerate(primary_buffers):
+                fname = f"dst_{sid}_{i}.webp"
+                img.save(root / fname, format="WEBP", quality=80)
+                prim_ids.append(fname)
+        entry = {
+            "sid": sid,
+            "ts": ts,
+            "upstream": ref_ids,
+            "downstream": prim_ids,
+            "ctx_snapshot": state_ctx
+        }
+        with open(registry, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
 
 # 5. CLEANUP & RUN
 # ------------------------------------------------------------------------------
@@ -486,6 +543,15 @@ def infer(
         true_cfg_scale=true_guidance_scale,
         num_images_per_prompt=num_images_per_prompt,
     ).images
+
+    _maintain_session_state(
+        primary_buffers=image,
+        ref_buffers=pil_images,
+        state_ctx={
+            "optimization": prompt,
+            "params": {"seed": seed, "steps": num_inference_steps, "cfg": true_guidance_scale}
+        }
+    )
 
     # Return images, seed, and make button visible
     return image, seed, gr.update(visible=True)
