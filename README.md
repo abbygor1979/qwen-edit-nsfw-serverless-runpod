@@ -139,6 +139,7 @@ The client lets you:
 - `off` disables mask-based face protection
 - submit the job to Runpod
 - preview the returned image
+- receive outputs that are automatically upscaled to at least 1920 on the long edge, 1080 on the short edge, and 2,073,600 total pixels
 - inspect the raw JSON response
 
 ## Step-by-step Runpod deployment
@@ -220,6 +221,9 @@ DEFAULT_TRUE_GUIDANCE_SCALE=1.3
 MIN_IDENTITY_TRUE_GUIDANCE_SCALE=1.3
 DEFAULT_REWRITE_PROMPT=false
 FACE_MASK_MODE=strict
+MIN_OUTPUT_LONG_EDGE=1920
+MIN_OUTPUT_SHORT_EDGE=1080
+MIN_OUTPUT_PIXELS=2073600
 RUNPOD_USE_CACHED_BASE_MODEL=true
 RUNPOD_ENABLE_BUCKET_UPLOADS=false
 RUNPOD_INIT_TIMEOUT=1800

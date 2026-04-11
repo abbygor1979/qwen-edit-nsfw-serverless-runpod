@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import gc
 import json
+import math
 import os
 import random
 import time
@@ -21,6 +22,9 @@ from safetensors.torch import load_file
 RUNPOD_HF_CACHE_ROOT = Path("/runpod-volume/huggingface-cache/hub")
 DEFAULT_OUTPUT_DIR = Path("/tmp/runpod-output")
 MAX_SEED = 2**31 - 1
+DEFAULT_MIN_OUTPUT_LONG_EDGE = 1920
+DEFAULT_MIN_OUTPUT_SHORT_EDGE = 1080
+DEFAULT_MIN_OUTPUT_PIXELS = 1920 * 1080
 
 SYSTEM_PROMPT = """
 # Edit Instruction Rewriter
@@ -213,6 +217,38 @@ def _pil_to_bytes(image: Image.Image, image_format: str) -> bytes:
     return buffer.getvalue()
 
 
+def _ensure_minimum_output_resolution(
+    image: Image.Image,
+    minimum_long_edge: int,
+    minimum_short_edge: int,
+    minimum_pixels: int,
+) -> tuple[Image.Image, Dict[str, Any]]:
+    width, height = image.size
+    if width <= 0 or height <= 0:
+        return image, {"upscaled": False, "original_width": width, "original_height": height}
+
+    long_edge = max(width, height)
+    short_edge = min(width, height)
+    area = width * height
+
+    scale = 1.0
+    if minimum_long_edge > 0 and long_edge < minimum_long_edge:
+        scale = max(scale, minimum_long_edge / long_edge)
+    if minimum_short_edge > 0 and short_edge < minimum_short_edge:
+        scale = max(scale, minimum_short_edge / short_edge)
+    if minimum_pixels > 0 and area < minimum_pixels:
+        scale = max(scale, math.sqrt(minimum_pixels / area))
+
+    if scale <= 1.0:
+        return image, {"upscaled": False, "original_width": width, "original_height": height}
+
+    resized = image.resize(
+        (int(math.ceil(width * scale)), int(math.ceil(height * scale))),
+        resample=Image.Resampling.LANCZOS,
+    )
+    return resized, {"upscaled": True, "original_width": width, "original_height": height}
+
+
 def _decode_base64_image(value: str) -> bytes:
     payload = value.split(",", 1)[1] if "," in value and value.startswith("data:") else value
     return base64.b64decode(payload)
@@ -361,6 +397,18 @@ class WorkerConfig:
     default_rewrite_prompt: bool = _to_bool(os.environ.get("DEFAULT_REWRITE_PROMPT"), False)
     lock_face_identity: bool = _to_bool(os.environ.get("LOCK_FACE_IDENTITY"), True)
     face_mask_mode: str = os.environ.get("FACE_MASK_MODE", "strict").strip().lower()
+    minimum_output_long_edge: int = _to_int(
+        os.environ.get("MIN_OUTPUT_LONG_EDGE"),
+        DEFAULT_MIN_OUTPUT_LONG_EDGE,
+    )
+    minimum_output_short_edge: int = _to_int(
+        os.environ.get("MIN_OUTPUT_SHORT_EDGE"),
+        DEFAULT_MIN_OUTPUT_SHORT_EDGE,
+    )
+    minimum_output_pixels: int = _to_int(
+        os.environ.get("MIN_OUTPUT_PIXELS"),
+        DEFAULT_MIN_OUTPUT_PIXELS,
+    )
     use_cached_base_model: bool = _to_bool(os.environ.get("RUNPOD_USE_CACHED_BASE_MODEL"), True)
     enable_bucket_uploads: bool = _to_bool(os.environ.get("RUNPOD_ENABLE_BUCKET_UPLOADS"), False)
     output_dir: Path = Path(os.environ.get("RUNPOD_OUTPUT_DIR", str(DEFAULT_OUTPUT_DIR)))
@@ -608,6 +656,12 @@ class QwenRunpodService:
         payloads: List[Dict[str, Any]] = []
 
         for index, image in enumerate(images):
+            image, output_resolution = _ensure_minimum_output_resolution(
+                image=image,
+                minimum_long_edge=self.config.minimum_output_long_edge,
+                minimum_short_edge=self.config.minimum_output_short_edge,
+                minimum_pixels=self.config.minimum_output_pixels,
+            )
             image_bytes = _pil_to_bytes(image, image_format)
             file_name = f"output_{index}.{image_format}"
             file_path = output_dir / file_name
@@ -619,6 +673,7 @@ class QwenRunpodService:
                 "height": image.height,
                 "format": image_format,
                 "file_name": file_name,
+                **output_resolution,
             }
 
             if use_bucket:

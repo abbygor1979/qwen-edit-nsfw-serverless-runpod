@@ -169,9 +169,17 @@ def run_inference(
         job_id = submitted["id"]
         result = poll_job(endpoint_id.strip(), api_key.strip(), job_id)
         output_image = extract_image(result) if result.get("status") == "COMPLETED" else None
+        output_images = ((result.get("output") or {}).get("images") or [])
+        first_image = output_images[0] if output_images else {}
+        resolution_text = (
+            f"{first_image.get('width', 'n/a')}x{first_image.get('height', 'n/a')}"
+            if first_image
+            else "n/a"
+        )
         status_text = (
             f"Job {job_id}\n"
             f"Status: {result.get('status')}\n"
+            f"Output: {resolution_text}\n"
             f"Delay: {result.get('delayTime', 'n/a')} ms\n"
             f"Execution: {result.get('executionTime', 'n/a')} ms"
         )
@@ -185,7 +193,7 @@ def run_inference(
 
 with gr.Blocks(title="Runpod Qwen Image Test Client") as demo:
     gr.Markdown("# Runpod Qwen Image Test Client")
-    gr.Markdown("Upload one image, enter a prompt, and test your Runpod endpoint.")
+    gr.Markdown("Upload one image, enter a prompt, and test your Runpod endpoint. Outputs are automatically delivered at at least 1080p-class 2MP resolution.")
 
     with gr.Row():
         endpoint_id = gr.Textbox(label="Endpoint ID", value=DEFAULT_ENDPOINT_ID)
