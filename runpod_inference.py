@@ -155,6 +155,51 @@ def _merge_negative_prompt(user_negative_prompt: str, enforce_identity_lock: boo
     return f"{base_negative}, {IDENTITY_LOCK_NEGATIVE_PROMPT}"
 
 
+def _cache_root_candidates() -> List[Path]:
+    candidates: List[Path] = [RUNPOD_HF_CACHE_ROOT]
+    env_hf_cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
+    env_transformers_cache = os.environ.get("TRANSFORMERS_CACHE")
+    env_hf_home = os.environ.get("HF_HOME")
+
+    for value in (env_hf_cache, env_transformers_cache):
+        if value:
+            candidates.append(Path(value))
+
+    if env_hf_home:
+        candidates.append(Path(env_hf_home) / "hub")
+
+    candidates.extend(
+        [
+            Path("/runpod-volume/hf-home/hub"),
+            Path("/tmp/hf-home/hub"),
+        ]
+    )
+
+    unique: List[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
+def _ensure_effective_true_cfg_scale(
+    requested_scale: float,
+    enforce_identity_lock: bool,
+    face_mask_mode: str,
+    minimum_identity_scale: float,
+) -> float:
+    if not enforce_identity_lock and face_mask_mode == "off":
+        return requested_scale
+
+    if requested_scale > 1.0:
+        return requested_scale
+
+    return minimum_identity_scale
+
+
 def _image_bytes_to_data_uri(image_bytes: bytes, image_format: str) -> str:
     encoded = base64.b64encode(image_bytes).decode("utf-8")
     mime = f"image/{image_format.lower()}"
@@ -247,10 +292,12 @@ def resolve_snapshot_path(model_id: str, cache_root: Path = RUNPOD_HF_CACHE_ROOT
 
 
 def _try_resolve_cached_model(model_id: str) -> str | None:
-    try:
-        return resolve_snapshot_path(model_id)
-    except Exception:
-        return None
+    for cache_root in _cache_root_candidates():
+        try:
+            return resolve_snapshot_path(model_id, cache_root=cache_root)
+        except Exception:
+            continue
+    return None
 
 
 def _import_pipeline_class():
@@ -307,9 +354,13 @@ class WorkerConfig:
     rewrite_model: str = os.environ.get("REWRITE_MODEL", "Qwen/Qwen2.5-VL-72B-Instruct")
     default_num_inference_steps: int = _to_int(os.environ.get("DEFAULT_NUM_INFERENCE_STEPS"), 4)
     default_true_guidance_scale: float = _to_float(os.environ.get("DEFAULT_TRUE_GUIDANCE_SCALE"), 1.0)
+    minimum_identity_true_guidance_scale: float = _to_float(
+        os.environ.get("MIN_IDENTITY_TRUE_GUIDANCE_SCALE"),
+        1.3,
+    )
     default_rewrite_prompt: bool = _to_bool(os.environ.get("DEFAULT_REWRITE_PROMPT"), False)
     lock_face_identity: bool = _to_bool(os.environ.get("LOCK_FACE_IDENTITY"), True)
-    face_mask_mode: str = os.environ.get("FACE_MASK_MODE", "balanced").strip().lower()
+    face_mask_mode: str = os.environ.get("FACE_MASK_MODE", "strict").strip().lower()
     use_cached_base_model: bool = _to_bool(os.environ.get("RUNPOD_USE_CACHED_BASE_MODEL"), True)
     enable_bucket_uploads: bool = _to_bool(os.environ.get("RUNPOD_ENABLE_BUCKET_UPLOADS"), False)
     output_dir: Path = Path(os.environ.get("RUNPOD_OUTPUT_DIR", str(DEFAULT_OUTPUT_DIR)))
@@ -348,7 +399,9 @@ class QwenRunpodService:
         if self.config.use_cached_base_model:
             cached_path = _try_resolve_cached_model(self.config.base_model_id)
             if cached_path:
+                print(f"[model] using local cached base model snapshot: {cached_path}")
                 return cached_path, True
+            print("[model] cached base model snapshot not found locally, falling back to Hugging Face download")
 
         return self.config.base_model_id, False
 
@@ -623,6 +676,12 @@ class QwenRunpodService:
         rewrite_prompt = _to_bool(job_input.get("rewrite_prompt"), self.config.default_rewrite_prompt)
         enforce_identity_lock = _to_bool(job_input.get("lock_face_identity"), self.config.lock_face_identity)
         face_mask_mode = str(job_input.get("face_mask_mode", self.config.face_mask_mode)).strip().lower()
+        true_guidance_scale = _ensure_effective_true_cfg_scale(
+            requested_scale=true_guidance_scale,
+            enforce_identity_lock=enforce_identity_lock,
+            face_mask_mode=face_mask_mode,
+            minimum_identity_scale=self.config.minimum_identity_true_guidance_scale,
+        )
         negative_prompt = _merge_negative_prompt(str(job_input.get("negative_prompt", " ")), enforce_identity_lock)
         height = _to_optional_int(job_input.get("height"))
         width = _to_optional_int(job_input.get("width"))

@@ -90,6 +90,16 @@ def _warp_image(image: Image.Image, affine: np.ndarray, output_size: tuple[int, 
     return image.convert("RGB").transform(output_size, Image.Transform.AFFINE, coeffs, resample=Image.Resampling.BICUBIC)
 
 
+def _expand_mask(mask: Image.Image, expand_px: int, blur_radius: float) -> Image.Image:
+    expanded = mask
+    if expand_px > 0:
+        filter_size = max(3, (expand_px * 2) + 1)
+        expanded = expanded.filter(ImageFilter.MaxFilter(size=filter_size))
+    if blur_radius > 0:
+        expanded = expanded.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    return expanded
+
+
 @dataclass
 class FaceMaskResult:
     image: Image.Image
@@ -162,6 +172,8 @@ class FaceIdentityMasker:
         base = max(size)
         face_blur = max(8.0, base / 80.0)
         core_blur = max(5.0, base / 120.0)
+        face_expand = max(10, int(base / 70))
+        core_expand = max(6, int(base / 120))
 
         face_mask = self._mask_from_indices(size, landmarks, [self._face_oval_ids], blur_radius=face_blur)
         core_groups = [
@@ -171,6 +183,8 @@ class FaceIdentityMasker:
             NOSE_INDICES,
         ]
         core_mask = self._mask_from_indices(size, landmarks, core_groups, blur_radius=core_blur)
+        face_mask = _expand_mask(face_mask, expand_px=face_expand, blur_radius=face_blur)
+        core_mask = _expand_mask(core_mask, expand_px=core_expand, blur_radius=core_blur)
         return face_mask, core_mask
 
     def protect(self, source_image: Image.Image, generated_image: Image.Image, mode: str = "balanced") -> FaceMaskResult:
@@ -197,9 +211,11 @@ class FaceIdentityMasker:
         core_alpha = (np.asarray(core_mask, dtype=np.float32) / 255.0)[..., None]
 
         if normalized_mode == "strict":
-            final = generated_array * (1.0 - face_alpha) + source_array * face_alpha
+            strict_low = source_array * 0.98 + generated_array * 0.02
+            strict = generated_array * (1.0 - face_alpha) + strict_low * face_alpha
+            strict = strict * (1.0 - core_alpha) + source_array * core_alpha
             return FaceMaskResult(
-                image=Image.fromarray(np.clip(final, 0, 255).astype(np.uint8), mode="RGB"),
+                image=Image.fromarray(np.clip(strict, 0, 255).astype(np.uint8), mode="RGB"),
                 applied=True,
                 mode="strict",
                 reason="strict-protection",
@@ -209,13 +225,18 @@ class FaceIdentityMasker:
         source_low = np.asarray(aligned_source.filter(ImageFilter.GaussianBlur(radius=detail_radius)), dtype=np.float32)
         generated_low = np.asarray(generated_rgb.filter(ImageFilter.GaussianBlur(radius=detail_radius)), dtype=np.float32)
         generated_detail = generated_array - generated_low
+        source_detail = source_array - source_low
 
-        face_mix_low = source_low * 0.72 + generated_low * 0.28
-        core_mix_low = source_low * 0.90 + generated_low * 0.10
+        face_mix_low = source_low * 0.86 + generated_low * 0.14
+        core_mix_low = source_low * 0.98 + generated_low * 0.02
 
         low_mix = generated_low * (1.0 - face_alpha) + face_mix_low * face_alpha
         low_mix = low_mix * (1.0 - core_alpha) + core_mix_low * core_alpha
-        inside_face = np.clip(low_mix + (generated_detail * 0.92), 0, 255)
+        detail_scale = np.ones_like(face_alpha, dtype=np.float32)
+        detail_scale = detail_scale * (1.0 - face_alpha) + (0.42 * face_alpha)
+        detail_scale = detail_scale * (1.0 - core_alpha) + (0.08 * core_alpha)
+        source_detail_boost = (core_alpha * 0.72) + (face_alpha * 0.18)
+        inside_face = np.clip(low_mix + (generated_detail * detail_scale) + (source_detail * source_detail_boost), 0, 255)
         final = generated_array * (1.0 - face_alpha) + inside_face * face_alpha
 
         return FaceMaskResult(

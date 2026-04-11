@@ -205,12 +205,12 @@ with gr.Blocks(title="Runpod Qwen Image Test Client") as demo:
         with gr.Row():
             seed = gr.Number(label="Seed", value=42, precision=0)
             num_inference_steps = gr.Slider(label="Inference Steps", minimum=1, maximum=10, step=1, value=4)
-            true_guidance_scale = gr.Slider(label="True Guidance Scale", minimum=1.0, maximum=10.0, step=0.1, value=1.0)
+            true_guidance_scale = gr.Slider(label="True Guidance Scale", minimum=1.0, maximum=10.0, step=0.1, value=1.3)
 
         with gr.Row():
             rewrite_prompt = gr.Checkbox(label="Rewrite Prompt", value=False)
             lock_face_identity = gr.Checkbox(label="Lock Face Identity", value=True)
-            face_mask_mode = gr.Dropdown(label="Face Mask Mode", choices=["balanced", "strict", "off"], value="balanced")
+            face_mask_mode = gr.Dropdown(label="Face Mask Mode", choices=["balanced", "strict", "off"], value="strict")
             num_images_per_prompt = gr.Slider(label="Images Per Prompt", minimum=1, maximum=4, step=1, value=1)
             output_format = gr.Dropdown(label="Output Format", choices=["png", "jpeg"], value="png")
 
