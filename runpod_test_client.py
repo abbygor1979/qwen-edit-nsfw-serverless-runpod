@@ -46,10 +46,12 @@ def build_payload(
     rewrite_prompt: bool,
     lock_face_identity: bool,
     face_mask_mode: str,
+    width: str,
+    height: str,
     num_images_per_prompt: int,
     output_format: str,
 ) -> Dict[str, Any]:
-    return {
+    payload: Dict[str, Any] = {
         "input": {
             "prompt": prompt,
             "images": [{"base64": image_to_data_uri(image.convert("RGB"), image_format="PNG")}],
@@ -65,6 +67,12 @@ def build_payload(
         }
     }
 
+    if str(width).strip():
+        payload["input"]["width"] = int(float(width))
+    if str(height).strip():
+        payload["input"]["height"] = int(float(height))
+
+    return payload
 
 def submit_job(
     endpoint_id: str,
@@ -139,6 +147,8 @@ def run_inference(
     rewrite_prompt: bool,
     lock_face_identity: bool,
     face_mask_mode: str,
+    width: str,
+    height: str,
     num_images_per_prompt: int,
     output_format: str,
 ) -> Tuple[Image.Image | None, str, str]:
@@ -160,6 +170,8 @@ def run_inference(
         rewrite_prompt=bool(rewrite_prompt),
         lock_face_identity=bool(lock_face_identity),
         face_mask_mode=face_mask_mode,
+        width=width,
+        height=height,
         num_images_per_prompt=int(num_images_per_prompt),
         output_format=output_format.lower(),
     )
@@ -171,15 +183,21 @@ def run_inference(
         output_image = extract_image(result) if result.get("status") == "COMPLETED" else None
         output_images = ((result.get("output") or {}).get("images") or [])
         first_image = output_images[0] if output_images else {}
-        resolution_text = (
+        delivered_resolution_text = (
             f"{first_image.get('width', 'n/a')}x{first_image.get('height', 'n/a')}"
+            if first_image
+            else "n/a"
+        )
+        generated_resolution_text = (
+            f"{first_image.get('original_width', 'n/a')}x{first_image.get('original_height', 'n/a')}"
             if first_image
             else "n/a"
         )
         status_text = (
             f"Job {job_id}\n"
             f"Status: {result.get('status')}\n"
-            f"Output: {resolution_text}\n"
+            f"Generated: {generated_resolution_text}\n"
+            f"Delivered: {delivered_resolution_text}\n"
             f"Delay: {result.get('delayTime', 'n/a')} ms\n"
             f"Execution: {result.get('executionTime', 'n/a')} ms"
         )
@@ -193,7 +211,7 @@ def run_inference(
 
 with gr.Blocks(title="Runpod Qwen Image Test Client") as demo:
     gr.Markdown("# Runpod Qwen Image Test Client")
-    gr.Markdown("Upload one image, enter a prompt, and test your Runpod endpoint. Outputs are automatically delivered at at least 1080p-class 2MP resolution.")
+    gr.Markdown("Upload one image, enter a prompt, and test your Runpod endpoint. The worker now targets a higher native render size, then delivers at least 1080p-class 2MP output.")
 
     with gr.Row():
         endpoint_id = gr.Textbox(label="Endpoint ID", value=DEFAULT_ENDPOINT_ID)
@@ -212,7 +230,7 @@ with gr.Blocks(title="Runpod Qwen Image Test Client") as demo:
     with gr.Accordion("Advanced", open=False):
         with gr.Row():
             seed = gr.Number(label="Seed", value=42, precision=0)
-            num_inference_steps = gr.Slider(label="Inference Steps", minimum=1, maximum=10, step=1, value=4)
+            num_inference_steps = gr.Slider(label="Inference Steps", minimum=1, maximum=12, step=1, value=6)
             true_guidance_scale = gr.Slider(label="True Guidance Scale", minimum=1.0, maximum=10.0, step=0.1, value=1.3)
 
         with gr.Row():
@@ -221,6 +239,10 @@ with gr.Blocks(title="Runpod Qwen Image Test Client") as demo:
             face_mask_mode = gr.Dropdown(label="Face Mask Mode", choices=["balanced", "strict", "off"], value="strict")
             num_images_per_prompt = gr.Slider(label="Images Per Prompt", minimum=1, maximum=4, step=1, value=1)
             output_format = gr.Dropdown(label="Output Format", choices=["png", "jpeg"], value="png")
+
+        with gr.Row():
+            width = gr.Textbox(label="Width (optional)", placeholder="Leave blank for HQ auto")
+            height = gr.Textbox(label="Height (optional)", placeholder="Leave blank for HQ auto")
 
     run_button = gr.Button("Run Test", variant="primary")
     status_box = gr.Textbox(label="Status", lines=4)
@@ -239,6 +261,8 @@ with gr.Blocks(title="Runpod Qwen Image Test Client") as demo:
             rewrite_prompt,
             lock_face_identity,
             face_mask_mode,
+            width,
+            height,
             num_images_per_prompt,
             output_format,
         ],

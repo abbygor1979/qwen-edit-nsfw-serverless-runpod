@@ -25,6 +25,11 @@ MAX_SEED = 2**31 - 1
 DEFAULT_MIN_OUTPUT_LONG_EDGE = 1920
 DEFAULT_MIN_OUTPUT_SHORT_EDGE = 1080
 DEFAULT_MIN_OUTPUT_PIXELS = 1920 * 1080
+DEFAULT_NATIVE_MIN_LONG_EDGE = 1536
+DEFAULT_NATIVE_MIN_SHORT_EDGE = 1216
+DEFAULT_NATIVE_MIN_PIXELS = 1216 * 1792
+DEFAULT_NATIVE_MAX_LONG_EDGE = 2048
+DEFAULT_GENERATION_SIZE_MULTIPLE = 32
 
 SYSTEM_PROMPT = """
 # Edit Instruction Rewriter
@@ -217,6 +222,96 @@ def _pil_to_bytes(image: Image.Image, image_format: str) -> bytes:
     return buffer.getvalue()
 
 
+def _align_dimension(value: float, multiple: int, round_up: bool = True) -> int:
+    if multiple <= 1:
+        rounded = math.ceil(value) if round_up else math.floor(value)
+        return max(1, int(rounded))
+
+    scaled = value / multiple
+    rounded = math.ceil(scaled) if round_up else math.floor(scaled)
+    return max(multiple, int(rounded) * multiple)
+
+
+def _resolve_generation_size(
+    requested_width: int | None,
+    requested_height: int | None,
+    reference_image: Image.Image | None,
+    minimum_long_edge: int,
+    minimum_short_edge: int,
+    minimum_pixels: int,
+    maximum_long_edge: int,
+    size_multiple: int,
+) -> tuple[int, int]:
+    aspect_ratio = 1.0
+    if reference_image is not None and reference_image.width > 0 and reference_image.height > 0:
+        aspect_ratio = reference_image.width / reference_image.height
+    aspect_ratio = max(aspect_ratio, 1e-3)
+
+    if requested_width and requested_height:
+        return (
+            _align_dimension(requested_width, size_multiple, round_up=True),
+            _align_dimension(requested_height, size_multiple, round_up=True),
+        )
+
+    if requested_width and not requested_height:
+        resolved_height = max(1, int(round(requested_width / aspect_ratio)))
+        return (
+            _align_dimension(requested_width, size_multiple, round_up=True),
+            _align_dimension(resolved_height, size_multiple, round_up=True),
+        )
+
+    if requested_height and not requested_width:
+        resolved_width = max(1, int(round(requested_height * aspect_ratio)))
+        return (
+            _align_dimension(resolved_width, size_multiple, round_up=True),
+            _align_dimension(requested_height, size_multiple, round_up=True),
+        )
+
+    if aspect_ratio >= 1.0:
+        width_norm = aspect_ratio
+        height_norm = 1.0
+    else:
+        width_norm = 1.0
+        height_norm = 1.0 / aspect_ratio
+
+    long_norm = max(width_norm, height_norm)
+    short_norm = min(width_norm, height_norm)
+    scale = 1.0
+
+    if minimum_short_edge > 0:
+        scale = max(scale, minimum_short_edge / short_norm)
+    if minimum_long_edge > 0:
+        scale = max(scale, minimum_long_edge / long_norm)
+    if minimum_pixels > 0:
+        scale = max(scale, math.sqrt(minimum_pixels / (width_norm * height_norm)))
+
+    width = width_norm * scale
+    height = height_norm * scale
+    align_up = True
+
+    if maximum_long_edge > 0 and max(width, height) > maximum_long_edge:
+        cap_scale = maximum_long_edge / max(width, height)
+        width *= cap_scale
+        height *= cap_scale
+        align_up = False
+
+    resolved_width = _align_dimension(width, size_multiple, round_up=align_up)
+    resolved_height = _align_dimension(height, size_multiple, round_up=align_up)
+
+    if maximum_long_edge > 0:
+        max_aligned_long_edge = _align_dimension(maximum_long_edge, size_multiple, round_up=False)
+        if resolved_width >= resolved_height and resolved_width > max_aligned_long_edge:
+            scale_down = max_aligned_long_edge / resolved_width
+            resolved_width = max_aligned_long_edge
+            resolved_height = _align_dimension(resolved_height * scale_down, size_multiple, round_up=False)
+        elif resolved_height > resolved_width and resolved_height > max_aligned_long_edge:
+            scale_down = max_aligned_long_edge / resolved_height
+            resolved_height = max_aligned_long_edge
+            resolved_width = _align_dimension(resolved_width * scale_down, size_multiple, round_up=False)
+
+    return resolved_width, resolved_height
+
+
 def _ensure_minimum_output_resolution(
     image: Image.Image,
     minimum_long_edge: int,
@@ -388,8 +483,8 @@ class WorkerConfig:
     )
     rewrite_provider: str = os.environ.get("REWRITE_PROVIDER", "nebius")
     rewrite_model: str = os.environ.get("REWRITE_MODEL", "Qwen/Qwen2.5-VL-72B-Instruct")
-    default_num_inference_steps: int = _to_int(os.environ.get("DEFAULT_NUM_INFERENCE_STEPS"), 4)
-    default_true_guidance_scale: float = _to_float(os.environ.get("DEFAULT_TRUE_GUIDANCE_SCALE"), 1.0)
+    default_num_inference_steps: int = _to_int(os.environ.get("DEFAULT_NUM_INFERENCE_STEPS"), 6)
+    default_true_guidance_scale: float = _to_float(os.environ.get("DEFAULT_TRUE_GUIDANCE_SCALE"), 1.3)
     minimum_identity_true_guidance_scale: float = _to_float(
         os.environ.get("MIN_IDENTITY_TRUE_GUIDANCE_SCALE"),
         1.3,
@@ -397,6 +492,26 @@ class WorkerConfig:
     default_rewrite_prompt: bool = _to_bool(os.environ.get("DEFAULT_REWRITE_PROMPT"), False)
     lock_face_identity: bool = _to_bool(os.environ.get("LOCK_FACE_IDENTITY"), True)
     face_mask_mode: str = os.environ.get("FACE_MASK_MODE", "strict").strip().lower()
+    minimum_native_long_edge: int = _to_int(
+        os.environ.get("MIN_NATIVE_LONG_EDGE"),
+        DEFAULT_NATIVE_MIN_LONG_EDGE,
+    )
+    minimum_native_short_edge: int = _to_int(
+        os.environ.get("MIN_NATIVE_SHORT_EDGE"),
+        DEFAULT_NATIVE_MIN_SHORT_EDGE,
+    )
+    minimum_native_pixels: int = _to_int(
+        os.environ.get("MIN_NATIVE_PIXELS"),
+        DEFAULT_NATIVE_MIN_PIXELS,
+    )
+    maximum_native_long_edge: int = _to_int(
+        os.environ.get("MAX_NATIVE_LONG_EDGE"),
+        DEFAULT_NATIVE_MAX_LONG_EDGE,
+    )
+    generation_size_multiple: int = _to_int(
+        os.environ.get("GENERATION_SIZE_MULTIPLE"),
+        DEFAULT_GENERATION_SIZE_MULTIPLE,
+    )
     minimum_output_long_edge: int = _to_int(
         os.environ.get("MIN_OUTPUT_LONG_EDGE"),
         DEFAULT_MIN_OUTPUT_LONG_EDGE,
@@ -547,6 +662,24 @@ class QwenRunpodService:
                 local_files_only=local_files_only,
                 token=self.config.hf_token,
             ).to(self.config.device)
+            try:
+                if hasattr(self.pipe, "enable_vae_tiling"):
+                    self.pipe.enable_vae_tiling()
+                elif hasattr(self.pipe, "vae") and hasattr(self.pipe.vae, "enable_tiling"):
+                    self.pipe.vae.enable_tiling()
+                print("[model] enabled VAE tiling")
+            except Exception as exc:
+                print(f"[model] could not enable VAE tiling: {exc}")
+
+            try:
+                if hasattr(self.pipe, "enable_vae_slicing"):
+                    self.pipe.enable_vae_slicing()
+                elif hasattr(self.pipe, "vae") and hasattr(self.pipe.vae, "enable_slicing"):
+                    self.pipe.vae.enable_slicing()
+                print("[model] enabled VAE slicing")
+            except Exception as exc:
+                print(f"[model] could not enable VAE slicing: {exc}")
+
             transformer_class = _import_transformer_class()
             self.pipe.transformer.__class__ = transformer_class
 
@@ -738,12 +871,26 @@ class QwenRunpodService:
             minimum_identity_scale=self.config.minimum_identity_true_guidance_scale,
         )
         negative_prompt = _merge_negative_prompt(str(job_input.get("negative_prompt", " ")), enforce_identity_lock)
-        height = _to_optional_int(job_input.get("height"))
-        width = _to_optional_int(job_input.get("width"))
+        requested_height = _to_optional_int(job_input.get("height"))
+        requested_width = _to_optional_int(job_input.get("width"))
+        width, height = _resolve_generation_size(
+            requested_width=requested_width,
+            requested_height=requested_height,
+            reference_image=images[0] if images else None,
+            minimum_long_edge=self.config.minimum_native_long_edge,
+            minimum_short_edge=self.config.minimum_native_short_edge,
+            minimum_pixels=self.config.minimum_native_pixels,
+            maximum_long_edge=self.config.maximum_native_long_edge,
+            size_multiple=self.config.generation_size_multiple,
+        )
         output_format = str(job_input.get("output_format", "png")).strip().lower()
         upload_to_bucket = _to_bool(job_input.get("upload_to_bucket"), self.config.enable_bucket_uploads)
         resolved_prompt = self._rewrite_prompt(prompt, images) if rewrite_prompt else prompt
         resolved_prompt = _merge_prompt(resolved_prompt, enforce_identity_lock)
+        print(
+            f"[generation] native size {width}x{height}, steps={num_inference_steps}, "
+            f"true_cfg_scale={true_guidance_scale}"
+        )
 
         generator = torch.Generator(device=self.config.generator_device).manual_seed(seed)
         started_at = time.time()
@@ -791,6 +938,12 @@ class QwenRunpodService:
             "face_masking": face_masking,
             "num_images": len(image_payloads),
             "images": image_payloads,
+            "generation": {
+                "width": width,
+                "height": height,
+                "num_inference_steps": num_inference_steps,
+                "true_guidance_scale": true_guidance_scale,
+            },
             "timings": {
                 "worker_load_seconds": self._load_seconds,
                 "inference_seconds": inference_seconds,

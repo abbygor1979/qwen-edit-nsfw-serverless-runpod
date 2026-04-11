@@ -54,8 +54,8 @@ The Runpod handler accepts payloads like this:
     ],
     "seed": 42,
     "randomize_seed": false,
-    "true_guidance_scale": 1.0,
-    "num_inference_steps": 4,
+    "true_guidance_scale": 1.3,
+    "num_inference_steps": 6,
     "rewrite_prompt": false,
     "num_images_per_prompt": 1,
     "height": null,
@@ -137,8 +137,11 @@ The client lets you:
 - `balanced` preserves identity while still allowing surface edits like water droplets or subtle makeup
 - `strict` composites the source face back much more aggressively
 - `off` disables mask-based face protection
+- leave `Width` and `Height` blank to use the higher-quality automatic native render size
+- optionally set `Width` and `Height` manually if you want a custom native resolution
 - submit the job to Runpod
 - preview the returned image
+- inspect both the native generated size and the final delivered size in the status box
 - receive outputs that are automatically upscaled to at least 1920 on the long edge, 1080 on the short edge, and 2,073,600 total pixels
 - inspect the raw JSON response
 
@@ -216,11 +219,16 @@ Start with these:
 BASE_MODEL_ID=Qwen/Qwen-Image-Edit-2511
 CHECKPOINT_REPO_ID=Phr00t/Qwen-Image-Edit-Rapid-AIO
 CHECKPOINT_FILENAME=v23/Qwen-Rapid-AIO-NSFW-v23.safetensors
-DEFAULT_NUM_INFERENCE_STEPS=4
+DEFAULT_NUM_INFERENCE_STEPS=6
 DEFAULT_TRUE_GUIDANCE_SCALE=1.3
 MIN_IDENTITY_TRUE_GUIDANCE_SCALE=1.3
 DEFAULT_REWRITE_PROMPT=false
 FACE_MASK_MODE=strict
+MIN_NATIVE_LONG_EDGE=1536
+MIN_NATIVE_SHORT_EDGE=1216
+MIN_NATIVE_PIXELS=2179072
+MAX_NATIVE_LONG_EDGE=2048
+GENERATION_SIZE_MULTIPLE=32
 MIN_OUTPUT_LONG_EDGE=1920
 MIN_OUTPUT_SHORT_EDGE=1080
 MIN_OUTPUT_PIXELS=2073600
