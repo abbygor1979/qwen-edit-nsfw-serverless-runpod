@@ -1,0 +1,10 @@
+runpod>=1.7.6,<2.0.0
+numpy>=1.26.4,<3.0.0
+Pillow>=10.4.0
+requests>=2.32.3
+accelerate>=0.34.2
+safetensors>=0.4.5
+sentencepiece>=0.2.0
+transformers>=4.55.0
+huggingface_hub[hf_transfer]>=0.26.2
+diffusers @ git+https://github.com/huggingface/diffusers.git

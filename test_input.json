@@ -1,0 +1,15 @@
+{
+  "input": {
+    "prompt": "Replace Pikachu's sign text with \"Runpod ready\" while preserving the yarn art style.",
+    "images": [
+      "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/yarn-art-pikachu.png"
+    ],
+    "seed": 42,
+    "randomize_seed": false,
+    "true_guidance_scale": 1.0,
+    "num_inference_steps": 4,
+    "rewrite_prompt": false,
+    "num_images_per_prompt": 1,
+    "output_format": "png"
+  }
+}
