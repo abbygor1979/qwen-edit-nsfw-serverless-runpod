@@ -228,6 +228,12 @@ def _import_pipeline_class():
         return QwenImageEditPlusPipeline
 
 
+def _import_transformer_class():
+    from qwenimage.transformer_qwenimage import QwenImageTransformer2DModel
+
+    return QwenImageTransformer2DModel
+
+
 def _try_import_bucket_upload():
     try:
         from runpod.serverless.utils import rp_upload
@@ -395,6 +401,8 @@ class QwenRunpodService:
                 local_files_only=local_files_only,
                 token=self.config.hf_token,
             ).to(self.config.device)
+            transformer_class = _import_transformer_class()
+            self.pipe.transformer.__class__ = transformer_class
 
             checkpoint_path = self._resolve_checkpoint_path()
             self._inject_checkpoint(checkpoint_path)
