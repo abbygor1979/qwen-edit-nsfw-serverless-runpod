@@ -270,6 +270,12 @@ def _import_transformer_class():
     return QwenImageTransformer2DModel
 
 
+def _import_face_masker_class():
+    from face_masking import FaceIdentityMasker
+
+    return FaceIdentityMasker
+
+
 def _try_import_bucket_upload():
     try:
         from runpod.serverless.utils import rp_upload
@@ -303,6 +309,7 @@ class WorkerConfig:
     default_true_guidance_scale: float = _to_float(os.environ.get("DEFAULT_TRUE_GUIDANCE_SCALE"), 1.0)
     default_rewrite_prompt: bool = _to_bool(os.environ.get("DEFAULT_REWRITE_PROMPT"), False)
     lock_face_identity: bool = _to_bool(os.environ.get("LOCK_FACE_IDENTITY"), True)
+    face_mask_mode: str = os.environ.get("FACE_MASK_MODE", "balanced").strip().lower()
     use_cached_base_model: bool = _to_bool(os.environ.get("RUNPOD_USE_CACHED_BASE_MODEL"), True)
     enable_bucket_uploads: bool = _to_bool(os.environ.get("RUNPOD_ENABLE_BUCKET_UPLOADS"), False)
     output_dir: Path = Path(os.environ.get("RUNPOD_OUTPUT_DIR", str(DEFAULT_OUTPUT_DIR)))
@@ -328,6 +335,7 @@ class QwenRunpodService:
     def __init__(self, config: WorkerConfig):
         self.config = config
         self.pipe = None
+        self.face_masker = None
         self._load_lock = Lock()
         self._load_seconds = 0.0
 
@@ -492,6 +500,42 @@ class QwenRunpodService:
             print(f"[rewrite] prompt rewrite failed, falling back to original prompt: {exc}")
             return prompt
 
+    def _get_face_masker(self):
+        if self.face_masker is not None:
+            return self.face_masker
+
+        try:
+            masker_class = _import_face_masker_class()
+            self.face_masker = masker_class()
+        except Exception as exc:
+            print(f"[mask] face masking unavailable, continuing without it: {exc}")
+            self.face_masker = False
+
+        return self.face_masker
+
+    def _apply_face_masking(
+        self,
+        source_image: Image.Image,
+        generated_images: Sequence[Image.Image],
+        mode: str,
+    ) -> tuple[List[Image.Image], List[Dict[str, Any]]]:
+        normalized_mode = (mode or "off").strip().lower()
+        if normalized_mode == "off":
+            return list(generated_images), [{"applied": False, "mode": "off", "reason": "disabled"} for _ in generated_images]
+
+        masker = self._get_face_masker()
+        if masker is False:
+            return list(generated_images), [{"applied": False, "mode": normalized_mode, "reason": "masker-unavailable"} for _ in generated_images]
+
+        protected_images: List[Image.Image] = []
+        metadata: List[Dict[str, Any]] = []
+        for image in generated_images:
+            result = masker.protect(source_image=source_image, generated_image=image, mode=normalized_mode)
+            protected_images.append(result.image)
+            metadata.append({"applied": result.applied, "mode": result.mode, "reason": result.reason})
+
+        return protected_images, metadata
+
     def _serialize_output(
         self,
         job_id: str,
@@ -578,6 +622,7 @@ class QwenRunpodService:
         num_images_per_prompt = _to_int(job_input.get("num_images_per_prompt"), 1)
         rewrite_prompt = _to_bool(job_input.get("rewrite_prompt"), self.config.default_rewrite_prompt)
         enforce_identity_lock = _to_bool(job_input.get("lock_face_identity"), self.config.lock_face_identity)
+        face_mask_mode = str(job_input.get("face_mask_mode", self.config.face_mask_mode)).strip().lower()
         negative_prompt = _merge_negative_prompt(str(job_input.get("negative_prompt", " ")), enforce_identity_lock)
         height = _to_optional_int(job_input.get("height"))
         width = _to_optional_int(job_input.get("width"))
@@ -602,9 +647,20 @@ class QwenRunpodService:
                 num_images_per_prompt=num_images_per_prompt,
             )
 
+        output_images = list(output.images)
+        face_masking: List[Dict[str, Any]]
+        if images:
+            output_images, face_masking = self._apply_face_masking(
+                source_image=images[0],
+                generated_images=output_images,
+                mode=face_mask_mode,
+            )
+        else:
+            face_masking = [{"applied": False, "mode": face_mask_mode, "reason": "no-source-image"} for _ in output_images]
+
         image_payloads = self._serialize_output(
             job_id=str(job.get("id", f"job-{int(time.time())}")),
-            images=output.images,
+            images=output_images,
             image_format=output_format,
             upload_to_bucket=upload_to_bucket,
         )
@@ -617,6 +673,8 @@ class QwenRunpodService:
             "prompt": prompt,
             "resolved_prompt": resolved_prompt,
             "negative_prompt": negative_prompt,
+            "face_mask_mode": face_mask_mode,
+            "face_masking": face_masking,
             "num_images": len(image_payloads),
             "images": image_payloads,
             "timings": {

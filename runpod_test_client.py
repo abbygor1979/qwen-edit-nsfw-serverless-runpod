@@ -45,6 +45,7 @@ def build_payload(
     true_guidance_scale: float,
     rewrite_prompt: bool,
     lock_face_identity: bool,
+    face_mask_mode: str,
     num_images_per_prompt: int,
     output_format: str,
 ) -> Dict[str, Any]:
@@ -58,6 +59,7 @@ def build_payload(
             "num_inference_steps": num_inference_steps,
             "rewrite_prompt": rewrite_prompt,
             "lock_face_identity": lock_face_identity,
+            "face_mask_mode": face_mask_mode,
             "num_images_per_prompt": num_images_per_prompt,
             "output_format": output_format,
         }
@@ -136,6 +138,7 @@ def run_inference(
     true_guidance_scale: float,
     rewrite_prompt: bool,
     lock_face_identity: bool,
+    face_mask_mode: str,
     num_images_per_prompt: int,
     output_format: str,
 ) -> Tuple[Image.Image | None, str, str]:
@@ -156,6 +159,7 @@ def run_inference(
         true_guidance_scale=float(true_guidance_scale),
         rewrite_prompt=bool(rewrite_prompt),
         lock_face_identity=bool(lock_face_identity),
+        face_mask_mode=face_mask_mode,
         num_images_per_prompt=int(num_images_per_prompt),
         output_format=output_format.lower(),
     )
@@ -206,6 +210,7 @@ with gr.Blocks(title="Runpod Qwen Image Test Client") as demo:
         with gr.Row():
             rewrite_prompt = gr.Checkbox(label="Rewrite Prompt", value=False)
             lock_face_identity = gr.Checkbox(label="Lock Face Identity", value=True)
+            face_mask_mode = gr.Dropdown(label="Face Mask Mode", choices=["balanced", "strict", "off"], value="balanced")
             num_images_per_prompt = gr.Slider(label="Images Per Prompt", minimum=1, maximum=4, step=1, value=1)
             output_format = gr.Dropdown(label="Output Format", choices=["png", "jpeg"], value="png")
 
@@ -225,6 +230,7 @@ with gr.Blocks(title="Runpod Qwen Image Test Client") as demo:
             true_guidance_scale,
             rewrite_prompt,
             lock_face_identity,
+            face_mask_mode,
             num_images_per_prompt,
             output_format,
         ],

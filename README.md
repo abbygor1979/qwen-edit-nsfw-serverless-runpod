@@ -133,6 +133,10 @@ The client lets you:
 - upload one image
 - enter a prompt
 - keep `Lock Face Identity` enabled to preserve the source face during edits
+- choose `Face Mask Mode`:
+- `balanced` preserves identity while still allowing surface edits like water droplets or subtle makeup
+- `strict` composites the source face back much more aggressively
+- `off` disables mask-based face protection
 - submit the job to Runpod
 - preview the returned image
 - inspect the raw JSON response

@@ -1,5 +1,6 @@
 runpod>=1.7.6,<2.0.0
-numpy>=1.26.4,<3.0.0
+numpy>=1.26.4,<2.0.0
+mediapipe==0.10.14
 Pillow>=10.4.0
 requests>=2.32.3
 accelerate>=0.34.2
