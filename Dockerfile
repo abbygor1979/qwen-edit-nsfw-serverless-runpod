@@ -24,7 +24,7 @@ COPY requirements.runpod.txt .
 RUN python -m pip install --upgrade pip setuptools wheel && \
     pip install -r requirements.runpod.txt
 
-COPY handler.py runpod_inference.py ./
+COPY handler.py runpod_inference.py face_masking.py ./
 COPY qwenimage ./qwenimage
 
 CMD ["python", "-u", "handler.py"]
