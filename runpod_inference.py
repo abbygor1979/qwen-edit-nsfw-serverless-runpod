@@ -82,6 +82,20 @@ Please strictly follow the rewriting rules below:
 ```
 """
 
+IDENTITY_LOCK_INSTRUCTION = (
+    "Preserve the subject's face and identity exactly as in the source image. "
+    "Do not change facial structure, skin texture, eye shape, eye color, eyebrows, nose, lips, teeth, ears, age, "
+    "expression, head shape, hairstyle, hairline, or any distinguishing facial detail. "
+    "Keep the face aligned, natural, and unchanged even if the user prompt requests otherwise."
+)
+
+IDENTITY_LOCK_NEGATIVE_PROMPT = (
+    "changed face, different face, altered identity, new identity, face swap, different person, "
+    "modified facial features, altered eyes, altered eyebrows, altered nose, altered lips, altered jawline, "
+    "altered cheekbones, altered skin texture, altered hairline, altered hairstyle, de-aged face, aged face, "
+    "beautified face, retouched face, distorted face, asymmetrical face, malformed face, duplicated face"
+)
+
 
 def _to_bool(value: Any, default: bool = False) -> bool:
     if value is None:
@@ -117,6 +131,28 @@ def _listify(value: Any) -> List[Any]:
     if isinstance(value, list):
         return value
     return [value]
+
+
+def _merge_prompt(user_prompt: str, enforce_identity_lock: bool) -> str:
+    if not enforce_identity_lock:
+        return user_prompt.strip()
+
+    prompt = user_prompt.strip()
+    if not prompt:
+        return IDENTITY_LOCK_INSTRUCTION
+
+    return f"{prompt}\n\nAdditional hard requirement: {IDENTITY_LOCK_INSTRUCTION}"
+
+
+def _merge_negative_prompt(user_negative_prompt: str, enforce_identity_lock: bool) -> str:
+    base_negative = user_negative_prompt.strip()
+    if not enforce_identity_lock:
+        return base_negative or " "
+
+    if not base_negative:
+        return IDENTITY_LOCK_NEGATIVE_PROMPT
+
+    return f"{base_negative}, {IDENTITY_LOCK_NEGATIVE_PROMPT}"
 
 
 def _image_bytes_to_data_uri(image_bytes: bytes, image_format: str) -> str:
@@ -266,6 +302,7 @@ class WorkerConfig:
     default_num_inference_steps: int = _to_int(os.environ.get("DEFAULT_NUM_INFERENCE_STEPS"), 4)
     default_true_guidance_scale: float = _to_float(os.environ.get("DEFAULT_TRUE_GUIDANCE_SCALE"), 1.0)
     default_rewrite_prompt: bool = _to_bool(os.environ.get("DEFAULT_REWRITE_PROMPT"), False)
+    lock_face_identity: bool = _to_bool(os.environ.get("LOCK_FACE_IDENTITY"), True)
     use_cached_base_model: bool = _to_bool(os.environ.get("RUNPOD_USE_CACHED_BASE_MODEL"), True)
     enable_bucket_uploads: bool = _to_bool(os.environ.get("RUNPOD_ENABLE_BUCKET_UPLOADS"), False)
     output_dir: Path = Path(os.environ.get("RUNPOD_OUTPUT_DIR", str(DEFAULT_OUTPUT_DIR)))
@@ -540,12 +577,14 @@ class QwenRunpodService:
         )
         num_images_per_prompt = _to_int(job_input.get("num_images_per_prompt"), 1)
         rewrite_prompt = _to_bool(job_input.get("rewrite_prompt"), self.config.default_rewrite_prompt)
-        negative_prompt = str(job_input.get("negative_prompt", " "))
+        enforce_identity_lock = _to_bool(job_input.get("lock_face_identity"), self.config.lock_face_identity)
+        negative_prompt = _merge_negative_prompt(str(job_input.get("negative_prompt", " ")), enforce_identity_lock)
         height = _to_optional_int(job_input.get("height"))
         width = _to_optional_int(job_input.get("width"))
         output_format = str(job_input.get("output_format", "png")).strip().lower()
         upload_to_bucket = _to_bool(job_input.get("upload_to_bucket"), self.config.enable_bucket_uploads)
         resolved_prompt = self._rewrite_prompt(prompt, images) if rewrite_prompt else prompt
+        resolved_prompt = _merge_prompt(resolved_prompt, enforce_identity_lock)
 
         generator = torch.Generator(device=self.config.generator_device).manual_seed(seed)
         started_at = time.time()
@@ -577,6 +616,7 @@ class QwenRunpodService:
             "seed": seed,
             "prompt": prompt,
             "resolved_prompt": resolved_prompt,
+            "negative_prompt": negative_prompt,
             "num_images": len(image_payloads),
             "images": image_payloads,
             "timings": {

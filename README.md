@@ -107,6 +107,36 @@ python handler.py --rp_server_api
 
 The SDK uses `test_input.json` by default for local testing.
 
+## Local test client
+
+If you want a simple upload-and-prompt UI for testing the deployed Runpod endpoint, use:
+
+- `runpod_test_client.py`
+- `requirements.client.txt`
+
+Start it locally:
+
+```powershell
+pip install -r requirements.client.txt
+python runpod_test_client.py
+```
+
+Then open:
+
+```text
+http://127.0.0.1:7861
+```
+
+The client lets you:
+
+- paste your endpoint ID and Runpod API key
+- upload one image
+- enter a prompt
+- keep `Lock Face Identity` enabled to preserve the source face during edits
+- submit the job to Runpod
+- preview the returned image
+- inspect the raw JSON response
+
 ## Step-by-step Runpod deployment
 
 ### 1. Put this repo somewhere Runpod can build from
