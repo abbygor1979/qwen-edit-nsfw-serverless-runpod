@@ -54,9 +54,13 @@ The Runpod handler accepts payloads like this:
     ],
     "seed": 42,
     "randomize_seed": false,
-    "true_guidance_scale": 1.3,
-    "num_inference_steps": 6,
+    "quality_mode": "balanced",
     "rewrite_prompt": false,
+    "face_mask_strategy": "smart",
+    "face_mask_mode": "surface_fx",
+    "face_mask_strength": 0.86,
+    "debug_masks": false,
+    "postprocess_upscale_mode": "detail",
     "num_images_per_prompt": 1,
     "height": null,
     "width": null,
@@ -80,6 +84,11 @@ The worker returns:
 - `prompt`
 - `resolved_prompt`
 - `images`
+- `face_mask_strategy`
+- `face_mask_mode`
+- `face_masking`
+- `debug_masks`
+- `generation`
 - `timings`
 - `model`
 
@@ -133,17 +142,27 @@ The client lets you:
 - upload one image
 - enter a prompt
 - keep `Lock Face Identity` enabled to preserve the source face during edits
+- choose `Mask Strategy`:
+- `smart` uses parsing-aware masks, region-aware blending, adaptive sizing, and surface-safe editing
+- `auto` uses the smart path but falls back to the old landmark-only behavior if the parser path is unavailable
+- `legacy` forces the previous landmark-only behavior
 - choose `Face Mask Mode`:
-- `balanced` preserves identity while still allowing surface edits like water droplets or subtle makeup
-- `strict` composites the source face back much more aggressively
-- `off` disables mask-based face protection
+- `surface_fx` is the new best default for liquids, makeup, wet skin, lashes, and other surface-only edits
+- `balanced` preserves identity more broadly while still allowing moderate face edits
+- `strict` locks identity-critical regions most aggressively
+- `off` disables face protection
+- use `Mask Strength` to tune how strongly the source face is preserved
+- keep `Auto Steps` and `Auto Guidance` enabled if you want the worker to pick better values automatically
+- choose `Quality Mode` to trade speed vs image quality
+- optionally enable `Debug Masks` to return parser labels, region masks, and overlays for the first output image
+- choose `Upscale Mode` for the final postprocess stage after masking
 - leave `Width` and `Height` blank to use the higher-quality automatic native render size
 - optionally set `Width` and `Height` manually if you want a custom native resolution
 - submit the job to Runpod
 - preview the returned image
-- inspect both the native generated size and the final delivered size in the status box
+- inspect the mask engine, quality mode, face coverage, native generated size, and final delivered size in the status box
 - receive outputs that are automatically upscaled to at least 1920 on the long edge, 1080 on the short edge, and 2,073,600 total pixels
-- inspect the raw JSON response
+- inspect the raw JSON response and returned debug masks
 
 ## Step-by-step Runpod deployment
 
@@ -223,7 +242,12 @@ DEFAULT_NUM_INFERENCE_STEPS=6
 DEFAULT_TRUE_GUIDANCE_SCALE=1.3
 MIN_IDENTITY_TRUE_GUIDANCE_SCALE=1.3
 DEFAULT_REWRITE_PROMPT=false
-FACE_MASK_MODE=strict
+FACE_MASK_STRATEGY=smart
+FACE_MASK_MODE=surface_fx
+FACE_MASK_STRENGTH=0.86
+FACE_MASK_DEBUG=false
+QUALITY_MODE=balanced
+ADAPTIVE_GENERATION=true
 MIN_NATIVE_LONG_EDGE=1536
 MIN_NATIVE_SHORT_EDGE=1216
 MIN_NATIVE_PIXELS=2179072
@@ -232,8 +256,12 @@ GENERATION_SIZE_MULTIPLE=32
 MIN_OUTPUT_LONG_EDGE=1920
 MIN_OUTPUT_SHORT_EDGE=1080
 MIN_OUTPUT_PIXELS=2073600
+POSTPROCESS_UPSCALE_MODE=detail
 RUNPOD_USE_CACHED_BASE_MODEL=true
-RUNPOD_ENABLE_BUCKET_UPLOADS=false
+RUNPOD_ENABLE_BUCKET_UPLOADS=
+OOM_RETRY_ATTEMPTS=2
+OOM_RETRY_SCALE=0.86
+OOM_RETRY_MIN_STEPS=4
 RUNPOD_INIT_TIMEOUT=1800
 ```
 
@@ -241,7 +269,8 @@ Optional:
 
 - `HF_TOKEN`: only needed for gated/private Hugging Face assets.
 - `HF_INFERENCE_API_KEY`: only needed if you want `rewrite_prompt=true`.
-- `BUCKET_ENDPOINT_URL`, `BUCKET_ACCESS_KEY_ID`, `BUCKET_SECRET_ACCESS_KEY`: only needed if you want uploaded output URLs instead of base64 data URIs.
+- `BUCKET_ENDPOINT_URL`, `BUCKET_ACCESS_KEY_ID`, `BUCKET_SECRET_ACCESS_KEY`: if these are present and `RUNPOD_ENABLE_BUCKET_UPLOADS` is left empty, the worker auto-switches to uploaded URLs.
+- `FACE_MASK_STRATEGY=legacy`: forces the previous landmark-only masking behavior if you want a runtime fallback without changing branches.
 
 You can copy these from `.env.runpod.example`.
 
@@ -302,6 +331,15 @@ If you enable bucket uploads, the same field contains a normal URL instead.
 - Keep `max workers = 1` until you know the model fits comfortably on your chosen GPU type.
 - Prefer a longer idle timeout for this worker than you would for a small model. Cold starts are expensive here.
 - If boot time is still too high, keep one active worker warm instead of relying only on flex workers.
+
+## Rollback options
+
+You now have two ways to fall back to the previous behavior:
+
+- Runtime fallback: set `FACE_MASK_STRATEGY=legacy` or send `"face_mask_strategy": "legacy"` in the request payload.
+- Git fallback: deploy the Git branch `codex/pre-face-parsing-upgrade`, which points to the exact pre-upgrade commit.
+
+The runtime fallback is the fastest option if you only want the old masking behavior. The Git fallback is the safest option if you want the entire worker stack back exactly as it was before the parser-driven upgrade.
 
 ## Files you will usually touch
 
