@@ -1,5 +1,10 @@
 runpod>=1.7.6,<2.0.0
 numpy>=1.26.4,<2.0.0
+# Pinned explicitly: left unpinned, pip resolves a scipy built against
+# numpy 2.x (its scipy.special ufuncs stopped satisfying numpy 1.x's
+# PyUFuncObject check — "All ufuncs must have type numpy.ufunc" at import).
+# scipy 1.13.x is the last line built for numpy<2.
+scipy>=1.11,<1.14
 mediapipe==0.10.14
 Pillow>=10.4.0
 requests>=2.32.3
