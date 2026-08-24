@@ -1,10 +1,14 @@
 runpod>=1.7.6,<2.0.0
-numpy>=1.26.4,<2.0.0
-# Pinned explicitly: left unpinned, pip resolves a scipy built against
-# numpy 2.x (its scipy.special ufuncs stopped satisfying numpy 1.x's
-# PyUFuncObject check — "All ufuncs must have type numpy.ufunc" at import).
-# scipy 1.13.x is the last line built for numpy<2.
-scipy>=1.11,<1.14
+# Was numpy<2.0.0 — that pin predates this pin's own comment history and
+# appears to have been written defensively for mediapipe, but 0.10.14
+# (pinned below) is confirmed compatible with numpy 2.x; 0.10.15+ is what
+# actually needs numpy<2. Constraining numpy<2 forced pip toward an old
+# scipy built for the same ABI, which is what caused two different import
+# failures in a row (a numpy.ufunc mismatch, then a RecursionError deep in
+# diffusers' scheduler) — both symptoms of a numpy/scipy ABI pairing this
+# codebase was never actually pinned to run on. Letting both resolve
+# together, unconstrained, is the fix, not another guessed pin.
+numpy>=1.26.4
 mediapipe==0.10.14
 Pillow>=10.4.0
 requests>=2.32.3
