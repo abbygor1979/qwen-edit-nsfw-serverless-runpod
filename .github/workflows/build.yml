@@ -35,5 +35,8 @@ jobs:
           tags: |
             ${{ env.IMAGE_NAME }}:latest
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # No GHA cache: writing these large ML-dependency layers to the
+          # Actions cache backend took over an hour and then failed on an
+          # expired SAS token (the actual build+push itself finishes in a
+          # few minutes without it). Docker's own layer cache on the runner
+          # already helps across pushes within a run's cache lifetime.
