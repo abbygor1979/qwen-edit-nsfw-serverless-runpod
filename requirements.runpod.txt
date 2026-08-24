@@ -18,8 +18,14 @@ sentencepiece>=0.2.0
 transformers>=4.55.0
 huggingface_hub[hf_transfer]>=0.26.2
 pyfacer>=0.0.5
-# Was git+https://github.com/huggingface/diffusers.git (the moving dev HEAD,
-# built here as 0.40.0.dev0) — switched to the tagged 0.40.0 release after a
-# RecursionError deep in its scheduler's scipy import (unreproduced by any
-# fix on this end) that a moving, untagged HEAD gives no way to bisect.
-diffusers==0.40.0
+# 0.40.0's QwenEmbedRope.forward() signature is (video_fhw, device=None,
+# max_txt_seq_len=None) — this repo's vendored pipeline_qwenimage_edit_plus.py
+# calls pos_embed(img_shapes, txt_seq_lens, device=...), written against the
+# OLDER (video_fhw, txt_seq_lens, device) signature: txt_seq_lens lands
+# positionally on 0.40.0's `device` parameter, and the explicit device=
+# keyword then collides with it — "got multiple values for argument
+# 'device'". Confirmed against diffusers' own source at both tags: 0.35.0
+# still has the 3-positional-arg signature this pipeline expects; 0.40.0
+# does not. Pinned to the last version confirmed compatible with the
+# vendored call site, not the newest tagged release.
+diffusers==0.35.0
