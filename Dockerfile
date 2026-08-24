@@ -40,7 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /
 
 COPY requirements.runpod.txt .
 RUN python -m pip install --upgrade pip setuptools wheel && \
-    pip install -r requirements.runpod.txt
+    pip install --ignore-installed -r requirements.runpod.txt
 
 COPY handler.py runpod_inference.py face_masking.py ./
 COPY qwenimage ./qwenimage
