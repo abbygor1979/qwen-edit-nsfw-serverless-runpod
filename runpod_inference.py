@@ -557,7 +557,15 @@ def _open_pil_image(source: Any) -> Image.Image:
         return Image.open(BytesIO(_decode_base64_image(source))).convert("RGB")
 
     local_path = Path(source)
-    if local_path.exists():
+    try:
+        is_local_file = local_path.exists()
+    except OSError:
+        # A base64 payload is routinely far longer than the filesystem's
+        # NAME_MAX, so exists() itself raises ENAMETOOLONG instead of
+        # returning False. That is not a local path, it is base64.
+        is_local_file = False
+
+    if is_local_file:
         return Image.open(local_path).convert("RGB")
 
     return Image.open(BytesIO(_decode_base64_image(source))).convert("RGB")
