@@ -42,6 +42,14 @@ COPY requirements.runpod.txt .
 RUN python -m pip install --upgrade pip setuptools wheel && \
     pip install --ignore-installed -r requirements.runpod.txt
 
+# torchaudio ships in the base image for an audio use case this worker never
+# touches. Its compiled libtorchaudio.so fails to load in this environment,
+# and diffusers' qwenimage pipeline import chain does not tolerate "installed
+# but broken" the way it tolerates "not installed" (no try/except around the
+# load, only around the ImportError). Removing the package entirely turns an
+# unhandled native-library crash into a plain, already-handled ImportError.
+RUN pip uninstall -y torchaudio || true
+
 COPY handler.py runpod_inference.py face_masking.py ./
 COPY qwenimage ./qwenimage
 
