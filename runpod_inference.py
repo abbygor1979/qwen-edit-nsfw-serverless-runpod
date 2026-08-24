@@ -7,6 +7,7 @@ import math
 import os
 import random
 import time
+import traceback
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -1389,8 +1390,15 @@ def handle_job(job: Dict[str, Any]) -> Dict[str, Any]:
     try:
         return _SERVICE.predict(job)
     except Exception as exc:
-        print(f"[handler] job failed: {exc}")
+        # str(exc) alone is what RunPod's own `error` field showed all
+        # night — the final line of a diffusers lazy-import chain, never
+        # the actual file/line the real exception was raised from. Debugging
+        # blind against that one line is what took seven bug-fix commits to
+        # get this far; the full traceback is the fix for that meta-problem.
+        tb = traceback.format_exc()
+        print(f"[handler] job failed: {exc}\n{tb}")
         return {
             "status": "error",
             "error": str(exc),
+            "traceback": tb,
         }
