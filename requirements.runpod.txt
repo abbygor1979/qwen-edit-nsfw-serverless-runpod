@@ -14,4 +14,8 @@ sentencepiece>=0.2.0
 transformers>=4.55.0
 huggingface_hub[hf_transfer]>=0.26.2
 pyfacer>=0.0.5
-diffusers @ git+https://github.com/huggingface/diffusers.git
+# Was git+https://github.com/huggingface/diffusers.git (the moving dev HEAD,
+# built here as 0.40.0.dev0) — switched to the tagged 0.40.0 release after a
+# RecursionError deep in its scheduler's scipy import (unreproduced by any
+# fix on this end) that a moving, untagged HEAD gives no way to bisect.
+diffusers==0.40.0
