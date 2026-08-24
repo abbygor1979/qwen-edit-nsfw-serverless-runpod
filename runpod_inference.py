@@ -870,6 +870,16 @@ class QwenRunpodService:
                 torch_dtype=self.config.torch_dtype,
                 local_files_only=local_files_only,
                 token=self.config.hf_token,
+                # low_cpu_mem_usage (the from_pretrained default) attaches
+                # accelerate's device-dispatch hooks to submodules even for a
+                # plain single-GPU load. Those hooks inject `device` as a
+                # positional arg on forward(); QwenEmbedRope.forward() is
+                # called elsewhere in this repo's vendored transformer code
+                # with device=... as a keyword too, and the two collide:
+                # "got multiple values for argument 'device'". Disabling it
+                # skips accelerate's hook path entirely for this plain
+                # single-device load.
+                low_cpu_mem_usage=False,
             ).to(self.config.device)
             try:
                 if hasattr(self.pipe, "enable_vae_tiling"):
