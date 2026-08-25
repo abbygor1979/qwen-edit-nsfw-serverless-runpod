@@ -15,7 +15,15 @@ requests>=2.32.3
 accelerate>=0.34.2
 safetensors>=0.4.5
 sentencepiece>=0.2.0
-transformers>=4.55.0
+# Was transformers>=4.55.0 with no upper bound, which resolves to a version
+# past 4.56.2 that dropped transformers.utils.FLAX_WEIGHTS_NAME. diffusers'
+# own pipeline_loading_utils.py guards that import with
+# `if is_transformers_version("<=", "4.56.2")` starting in diffusers 0.39 —
+# but 0.39 is also where QwenEmbedRope's signature broke this pipeline's
+# call site (see the diffusers pin below), so bumping diffusers to dodge
+# this isn't available; capping transformers at the version diffusers
+# 0.38.0 itself was guarding for is.
+transformers>=4.55.0,<=4.56.2
 huggingface_hub[hf_transfer]>=0.26.2
 pyfacer>=0.0.5
 # 0.40.0's QwenEmbedRope.forward() dropped positional txt_seq_lens for
