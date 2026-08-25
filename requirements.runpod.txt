@@ -18,14 +18,16 @@ sentencepiece>=0.2.0
 transformers>=4.55.0
 huggingface_hub[hf_transfer]>=0.26.2
 pyfacer>=0.0.5
-# 0.40.0's QwenEmbedRope.forward() signature is (video_fhw, device=None,
-# max_txt_seq_len=None) — this repo's vendored pipeline_qwenimage_edit_plus.py
-# calls pos_embed(img_shapes, txt_seq_lens, device=...), written against the
-# OLDER (video_fhw, txt_seq_lens, device) signature: txt_seq_lens lands
-# positionally on 0.40.0's `device` parameter, and the explicit device=
-# keyword then collides with it — "got multiple values for argument
-# 'device'". Confirmed against diffusers' own source at both tags: 0.35.0
-# still has the 3-positional-arg signature this pipeline expects; 0.40.0
-# does not. Pinned to the last version confirmed compatible with the
-# vendored call site, not the newest tagged release.
-diffusers==0.35.0
+# 0.40.0's QwenEmbedRope.forward() dropped positional txt_seq_lens for
+# (video_fhw, device=None, max_txt_seq_len=None) — this repo's vendored
+# pipeline_qwenimage_edit_plus.py calls pos_embed(img_shapes, txt_seq_lens,
+# device=...), and txt_seq_lens lands positionally on 0.40.0's `device`
+# param, colliding with the explicit device= keyword ("got multiple values
+# for argument 'device'"). 0.35.0 has the fully old 3-arg signature but its
+# own pipeline_loading_utils.py imports FLAX_WEIGHTS_NAME from
+# transformers.utils, removed in the transformers version this stack
+# otherwise needs — a different, unrelated ImportError. 0.38.0 is the
+# confirmed sweet spot: forward(video_fhw, txt_seq_lens=None, device=None,
+# max_txt_seq_len=None) keeps txt_seq_lens positional-compatible while
+# being new enough not to hit the transformers incompatibility.
+diffusers==0.38.0
